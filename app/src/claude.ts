@@ -1,7 +1,7 @@
 // The Claude panel: chat with Claude Code about the paper. Claude edits
 // through the paper's MCP tools, so its changes stream into the editor and
 // history like a co-author's.
-import { api, events, type ChatAttachment, type ClaudeAuthInfo, type ClaudePermissionReply, type ClaudeSession, type EditorContext } from "./api";
+import { api, events, type ChatAttachment, type ClaudeAuthInfo, type ClaudePermissionReply, type ClaudeSession, type ContextMention, type EditorContext } from "./api";
 import { clear, h, showModal, timeAgo, toast } from "./ui";
 
 /** Minimal, safe Markdown: everything is escaped before formatting is applied. */
@@ -69,9 +69,9 @@ const AUTH_KEY = "letswritepaper.claudeAuth";
 const CUSTOM_MODEL = "__custom__";
 
 const ASSISTANTS: { id: AssistantId; label: string; product: string; placeholder: string }[] = [
-  { id: "claude", label: "Claude", product: "Claude Code", placeholder: "Ask Claude… Paste an image or file, or type / for usage, status, and plugins" },
-  { id: "chatgpt", label: "ChatGPT", product: "Codex", placeholder: "Ask ChatGPT… Paste an image or file (Enter to send, Shift+Enter for a new line)" },
-  { id: "gemini", label: "Gemini", product: "Antigravity", placeholder: "Ask Gemini… Paste a file and Gemini can read it (Enter to send, Shift+Enter for a new line)" },
+  { id: "claude", label: "Claude", product: "Claude Code", placeholder: "Ask Claude… @ to tag a file, or / for usage, status, and plugins" },
+  { id: "chatgpt", label: "ChatGPT", product: "Codex", placeholder: "Ask ChatGPT… @ to tag a file (Enter to send, Shift+Enter for a new line)" },
+  { id: "gemini", label: "Gemini", product: "Antigravity", placeholder: "Ask Gemini… @ to tag a file (Enter to send, Shift+Enter for a new line)" },
 ];
 
 interface SlashCommand {
@@ -125,6 +125,45 @@ function slashToken(value: string): string {
 function isSlashMessage(text: string): boolean {
   const line = text.trim().split("\n", 1)[0]?.trim() ?? "";
   return /^\/[A-Za-z]/.test(line.split(/\s/, 1)[0] ?? "");
+}
+
+const MAX_TAGS = 8;
+const MAX_MENTION_CHARS = 8000;
+
+function clipMention(text: string | undefined): string | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= MAX_MENTION_CHARS) return trimmed;
+  return `${trimmed.slice(0, MAX_MENTION_CHARS)}\n…(truncated)`;
+}
+
+function mentionKey(tag: ContextMention): string {
+  return tag.kind === "section" ? `section:${tag.path}:${tag.section ?? ""}` : `file:${tag.path}`;
+}
+
+function fileRank(path: string, query: string): number {
+  if (!query) return 0;
+  const name = path.split(/[\\/]/).pop()?.toLowerCase() ?? path.toLowerCase();
+  const full = path.toLowerCase();
+  if (name.startsWith(query)) return 0;
+  if (full.startsWith(query)) return 1;
+  if (name.includes(query)) return 2;
+  if (full.includes(query)) return 3;
+  return 9;
+}
+
+/** The @query at the cursor, when @ starts the message or follows whitespace. */
+function atQuery(value: string, cursor: number): { start: number; query: string } | null {
+  const match = /(?:^|\s)@([^\s@]*)$/.exec(value.slice(0, cursor));
+  if (!match) return null;
+  const query = match[1] ?? "";
+  return { start: cursor - query.length - 1, query };
+}
+
+function fileChipName(path: string, tags: ContextMention[]): string {
+  const name = path.split(/[\\/]/).pop() || path;
+  const duplicated = tags.some((tag) => tag.kind === "file" && tag.path !== path && (tag.path.split(/[\\/]/).pop() || tag.path) === name);
+  return duplicated ? path : name;
 }
 
 function mediaFromName(name: string): string {
@@ -513,8 +552,17 @@ export class ClaudePanel {
   private stderr: string[] = [];
   private ready = false;
   private pending: PendingFile[] = [];
+  private tags: ContextMention[] = [];
   private attachRow: HTMLElement;
+  private tagRow: HTMLElement;
   private slashMenu: HTMLElement;
+  private atMenu: HTMLElement;
+  private atMatches: string[] = [];
+  private atIndex = 0;
+  private atStart = 0;
+  private atQueryText = "";
+  /** `@` query hidden with Escape, so the menu stays closed until the query changes. */
+  private atDismissed = "";
   private slashMatches: SlashCommand[] = [];
   private slashIndex = 0;
   private slashTokenShown = "";
@@ -525,13 +573,18 @@ export class ClaudePanel {
     private root: HTMLElement,
     private context: () => EditorContext,
     private paperTitle: string,
+    private listDocs: () => readonly string[],
   ) {
     this.log = h("div", { class: "chat-log", "aria-live": "polite" });
     this.input = h("textarea", { class: "chat-input", rows: 3, placeholder: assistantMeta("claude").placeholder });
     this.attachRow = h("div", { class: "attach-row" });
     this.attachRow.hidden = true;
+    this.tagRow = h("div", { class: "attach-row" });
+    this.tagRow.hidden = true;
     this.slashMenu = h("div", { class: "slash-menu", role: "listbox", "aria-label": "Claude commands" });
     this.slashMenu.hidden = true;
+    this.atMenu = h("div", { class: "slash-menu", role: "listbox", "aria-label": "Project files" });
+    this.atMenu.hidden = true;
     this.fileInput = h("input", { type: "file", multiple: true });
     this.fileInput.hidden = true;
     this.fileInput.addEventListener("change", () => {
@@ -560,48 +613,10 @@ export class ClaudePanel {
       },
     });
     this.fillModelSelect();
-    this.input.addEventListener("keydown", (e) => {
-      if (this.slashMatches.length && !this.slashMenu.hidden) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          this.slashIndex = Math.min(this.slashIndex + 1, this.slashMatches.length - 1);
-          this.paintSlash();
-          return;
-        }
-        if (e.key === "ArrowUp") {
-          e.preventDefault();
-          this.slashIndex = Math.max(this.slashIndex - 1, 0);
-          this.paintSlash();
-          return;
-        }
-        if (e.key === "Escape") {
-          e.preventDefault();
-          this.closeSlash();
-          return;
-        }
-        if (e.key === "Tab") {
-          e.preventDefault();
-          const cmd = this.slashMatches[this.slashIndex];
-          if (cmd) this.applySlash(cmd);
-          return;
-        }
-        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-          const token = slashToken(this.input.value);
-          const cmd = this.slashMatches[this.slashIndex];
-          if (cmd && this.input.value.trim() === token) {
-            e.preventDefault();
-            if (cmd.send) void this.submit(cmd.name);
-            else this.applySlash(cmd);
-            return;
-          }
-        }
-      }
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-        e.preventDefault();
-        void this.submit();
-      }
-    });
-    this.input.addEventListener("input", () => this.refreshSlash());
+    this.input.addEventListener("keydown", (e) => this.onInputKey(e));
+    this.input.addEventListener("input", () => this.refreshComposerMenus());
+    this.input.addEventListener("keyup", () => this.refreshComposerMenus());
+    this.input.addEventListener("click", () => this.refreshComposerMenus());
     this.input.addEventListener("paste", (e) => {
       const data = e.clipboardData;
       if (!data) return;
@@ -738,6 +753,8 @@ export class ClaudePanel {
         },
         h("div", { class: "chips" }, ...QUICK_ACTIONS.map(([label, prompt]) => h("button", { class: "chip add", onclick: () => void this.submit(prompt) }, label))),
         this.slashMenu,
+        this.atMenu,
+        this.tagRow,
         this.attachRow,
         this.input,
         this.fileInput,
@@ -757,15 +774,14 @@ export class ClaudePanel {
     this.statusLine.textContent = version ? `${meta.product} ${version.split(" ")[0]}` : "";
     this.input.placeholder = meta.placeholder;
     this.paintAttachments();
-    this.refreshSlash();
+    this.paintTags();
+    this.refreshComposerMenus();
     if (!this.log.childElementCount) {
       const credit = this.assistant === "claude" ? "claude-code" : this.assistant === "chatgpt" ? "codex" : "gemini";
-      const extra = this.assistant === "claude"
-        ? " Paste or drop images and files, or type / for usage, status, and plugins."
-        : " Paste or drop images and files.";
+      const extra = this.assistant === "claude" ? " Paste or drop images and files, or type / for usage, status, and plugins." : "";
       this.log.append(
         h("div", { class: "chat-empty muted" },
-          h("p", {}, `Ask ${meta.label} to work on your paper. It sees which file and section you're in and what you've selected.${extra}`),
+          h("p", {}, `Ask ${meta.label} to work on your paper. ⌘/Ctrl+L tags the section you're in. Type @ to tag a file.${extra}`),
           h("p", {}, `Its edits appear live in the editor, credited to ${credit} in History and Blame.`),
         ),
       );
@@ -899,8 +915,13 @@ export class ClaudePanel {
     this.paintAttachments();
   }
 
-  private userBubble(caption: string, files: PendingFile[]) {
+  private userBubble(caption: string, files: PendingFile[], tags: ContextMention[] = []) {
     const bubble = h("div", { class: "msg user" }, h("div", {}, caption));
+    if (tags.length) {
+      bubble.append(
+        h("div", { class: "attach-sent" }, ...tags.map((tag) => h("span", { class: "attach-chip tag-chip" }, tag.kind === "section" ? `§ ${tag.section}` : `@${tag.path}`))),
+      );
+    }
     if (!files.length) return bubble;
     const row = h("div", { class: "attach-sent" });
     for (const file of files) {
@@ -909,6 +930,224 @@ export class ClaudePanel {
     }
     bubble.append(row);
     return bubble;
+  }
+
+  /** ⌘/Ctrl+L: tag the section the cursor is in, then focus the composer. */
+  tagCursorSection() {
+    void this.show().finally(() => {
+      const ctx = this.context();
+      const path = ctx.path?.trim();
+      if (!path) {
+        if (this.ready) this.input.focus();
+        toast("Open a document to tag the current section.");
+        return;
+      }
+      const section = ctx.section?.trim();
+      if (section) this.addTag({ kind: "section", path, section, line: ctx.line, text: clipMention(ctx.selection) });
+      else this.addTag({ kind: "file", path, line: ctx.line, text: clipMention(ctx.selection) });
+      if (this.ready) this.input.focus();
+    });
+  }
+
+  private onInputKey(e: KeyboardEvent) {
+    if (this.atMatches.length && !this.atMenu.hidden) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        this.atIndex = Math.min(this.atIndex + 1, this.atMatches.length - 1);
+        this.paintAt();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        this.atIndex = Math.max(this.atIndex - 1, 0);
+        this.paintAt();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeAt(true);
+        return;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.isComposing)) {
+        e.preventDefault();
+        const path = this.atMatches[this.atIndex];
+        if (path) this.acceptAt(path);
+        return;
+      }
+    }
+    if (this.slashMatches.length && !this.slashMenu.hidden) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        this.slashIndex = Math.min(this.slashIndex + 1, this.slashMatches.length - 1);
+        this.paintSlash();
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        this.slashIndex = Math.max(this.slashIndex - 1, 0);
+        this.paintSlash();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeSlash();
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        const cmd = this.slashMatches[this.slashIndex];
+        if (cmd) this.applySlash(cmd);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        const token = slashToken(this.input.value);
+        const cmd = this.slashMatches[this.slashIndex];
+        if (cmd && this.input.value.trim() === token) {
+          e.preventDefault();
+          if (cmd.send) void this.submit(cmd.name);
+          else this.applySlash(cmd);
+          return;
+        }
+      }
+    }
+    if (e.key === "Backspace" && !e.metaKey && !e.ctrlKey && !e.altKey && !this.input.value && this.tags.length) {
+      e.preventDefault();
+      this.tags.pop();
+      this.paintTags();
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      void this.submit();
+    }
+  }
+
+  private refreshComposerMenus() {
+    if (this.refreshAt()) return;
+    this.refreshSlash();
+  }
+
+  private refreshAt(): boolean {
+    const cursor = this.input.selectionStart ?? this.input.value.length;
+    const at = atQuery(this.input.value, cursor);
+    if (!at) {
+      this.atDismissed = "";
+      this.closeAt();
+      return false;
+    }
+    if (`${at.start}:${at.query}` === this.atDismissed) return false;
+    const query = at.query.toLowerCase();
+    const ranked = [...this.listDocs()]
+      .map((path) => ({ path, rank: fileRank(path, query) }))
+      .filter((item) => item.rank < 9)
+      .sort((a, b) => a.rank - b.rank || a.path.localeCompare(b.path))
+      .slice(0, 12);
+    if (!ranked.length) {
+      this.closeAt();
+      return false;
+    }
+    const paths = ranked.map((item) => item.path);
+    const same = paths.length === this.atMatches.length && paths.every((path, index) => path === this.atMatches[index]);
+    if (this.atStart !== at.start || this.atQueryText !== at.query || !same) this.atIndex = 0;
+    this.atMatches = paths;
+    this.atStart = at.start;
+    this.atQueryText = at.query;
+    this.atIndex = Math.min(this.atIndex, this.atMatches.length - 1);
+    this.paintAt();
+    this.atMenu.hidden = false;
+    this.closeSlash();
+    return true;
+  }
+
+  private paintAt() {
+    clear(
+      this.atMenu,
+      ...this.atMatches.map((path, index) =>
+        h(
+          "button",
+          {
+            type: "button",
+            class: `slash-item${index === this.atIndex ? " active" : ""}`,
+            role: "option",
+            onmousedown: (e: Event) => e.preventDefault(),
+            onclick: () => this.acceptAt(path),
+          },
+          h("code", {}, "@"),
+          h("span", {}, path),
+        ),
+      ),
+    );
+  }
+
+  private acceptAt(path: string) {
+    const value = this.input.value;
+    const end = this.atStart + 1 + this.atQueryText.length;
+    if (value.slice(this.atStart, this.atStart + 1) === "@") {
+      this.input.value = value.slice(0, this.atStart) + value.slice(Math.min(end, value.length));
+      this.input.selectionStart = this.input.selectionEnd = this.atStart;
+    }
+    this.addTag({ kind: "file", path });
+    this.closeAt();
+    this.refreshSlash();
+    this.input.focus();
+  }
+
+  private closeAt(dismiss = false) {
+    if (dismiss) this.atDismissed = `${this.atStart}:${this.atQueryText}`;
+    this.atMatches = [];
+    this.atIndex = 0;
+    this.atQueryText = "";
+    this.atMenu.hidden = true;
+    clear(this.atMenu);
+  }
+
+  private addTag(tag: ContextMention) {
+    const next: ContextMention = { ...tag, text: clipMention(tag.text) };
+    const index = this.tags.findIndex((item) => mentionKey(item) === mentionKey(next));
+    if (index >= 0) this.tags[index] = { ...this.tags[index], ...next };
+    else if (this.tags.length >= MAX_TAGS) {
+      toast("You can tag up to 8 sections and files.", "error");
+      return;
+    } else this.tags.push(next);
+    this.paintTags();
+  }
+
+  private paintTags() {
+    clear(
+      this.tagRow,
+      ...this.tags.map((tag, index) => {
+        const label = tag.kind === "section" ? `§ ${tag.section}` : `@${fileChipName(tag.path, this.tags)}`;
+        const where = tag.line ? `${tag.path}:${tag.line}` : tag.path;
+        const title = tag.text ? `${where} · includes the selection` : where;
+        return h(
+          "span",
+          { class: "attach-chip tag-chip", title },
+          h("span", {}, label),
+          h("button", {
+            class: "icon",
+            title: "Remove",
+            "aria-label": `Remove ${label}`,
+            onclick: () => {
+              this.tags.splice(index, 1);
+              this.paintTags();
+            },
+          }, "×"),
+        );
+      }),
+    );
+    this.tagRow.hidden = this.tags.length === 0;
+  }
+
+  private clearTags() {
+    this.tags = [];
+    this.paintTags();
+  }
+
+  private outboundContext(slash: boolean, tags: ContextMention[]): EditorContext | undefined {
+    if (slash) return undefined;
+    const live = this.shareContext ? this.context() : undefined;
+    if (!live && !tags.length) return undefined;
+    return { ...(live ?? {}), ...(tags.length ? { mentions: tags } : {}) };
   }
 
   private refreshSlash() {
@@ -979,15 +1218,17 @@ export class ClaudePanel {
     const fromComposer = text === undefined;
     const msg = (text ?? this.input.value).trim();
     const files = fromComposer ? this.pending.slice() : [];
-    if ((!msg && files.length === 0) || this.busy) return;
-    if (!this.ready) await this.show();
     const slash = this.assistant === "claude" && isSlashMessage(msg);
+    const tags = slash ? [] : this.tags.slice();
+    if ((!msg && files.length === 0 && tags.length === 0) || this.busy) return;
+    if (!this.ready) await this.show();
     const sending = slash ? [] : files;
-    const caption = msg || "Please look at the attached files.";
+    const caption = msg || (tags.length ? "Please look at what I tagged." : "Please look at the attached files.");
     if (fromComposer) this.input.value = "";
     this.closeSlash();
+    this.closeAt();
     this.log.querySelector(".chat-empty")?.remove();
-    this.log.append(this.userBubble(caption, sending));
+    this.log.append(this.userBubble(caption, sending, tags));
     this.scroll();
     this.stderr = [];
     this.streamedThisTurn = false;
@@ -999,15 +1240,13 @@ export class ClaudePanel {
         media_type: file.media_type,
         data: file.data,
       }));
-      await api.claudeSend(
-        this.chatId,
-        caption,
-        slash || !this.shareContext ? undefined : this.context(),
-        attachments,
-      );
-      if (fromComposer && !slash) this.clearPending();
-      if (fromComposer && slash && files.length) {
-        toast("Sent the command. The attached files stay here for the next message.");
+      await api.claudeSend(this.chatId, caption, this.outboundContext(slash, tags), attachments);
+      if (fromComposer && !slash) {
+        this.clearPending();
+        this.clearTags();
+      }
+      if (fromComposer && slash && (files.length || this.tags.length)) {
+        toast("Sent the command. The attached files and tags stay here for the next message.");
       }
     } catch (e) {
       if (fromComposer && !this.input.value) this.input.value = msg;

@@ -33,13 +33,17 @@ export class Preview {
         h("strong", {}, "Preview"),
         this.status,
         h("span", { class: "spacer" }),
-        h("button", { class: "icon", title: "Zoom out", onclick: () => this.setZoom(this.zoom - 0.1) }, "−"),
-        h("button", { class: "icon", title: "Zoom in", onclick: () => this.setZoom(this.zoom + 0.1) }, "+"),
+        h("button", { class: "icon", title: "Zoom out (⌘/Ctrl+scroll)", onclick: () => this.setZoom(this.zoom - 0.1) }, "−"),
+        h("button", { class: "icon", title: "Zoom in (⌘/Ctrl+scroll)", onclick: () => this.setZoom(this.zoom + 0.1) }, "+"),
         h("button", { title: "Compile (⌘/Ctrl+S)", onclick: () => void this.compile() }, "Compile"),
       ),
       this.diags,
       this.pages,
     );
+  }
+
+  nudgeZoom(delta: number) {
+    this.setZoom(this.zoom + delta);
   }
 
   private setZoom(z: number) {

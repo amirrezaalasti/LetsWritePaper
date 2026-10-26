@@ -244,11 +244,22 @@ export interface ClaudePermissionReply {
   decision?: "user_temporary" | "user_permanent" | "user_reject";
 }
 
+export interface ContextMention {
+  /** `section` from ⌘/Ctrl+L, or `file` from @. */
+  kind: "section" | "file";
+  path: string;
+  section?: string;
+  line?: number;
+  /** Selection inside the tagged section or file, when there is one. */
+  text?: string;
+}
+
 export interface EditorContext {
   path?: string;
   line?: number;
   section?: string;
   selection?: string;
+  mentions?: ContextMention[];
 }
 
 export interface ChatAttachment {

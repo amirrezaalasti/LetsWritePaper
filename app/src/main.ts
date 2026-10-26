@@ -9,12 +9,32 @@ import { Preview } from "./preview";
 import { initTheme, themePicker } from "./themes";
 import { setupWizard } from "./setup";
 import { authorBadge, clear, form, guard, h, toast } from "./ui";
+import {
+  EDITOR_FONT_DEFAULT,
+  EDITOR_FONT_MAX,
+  EDITOR_FONT_MIN,
+  EDITOR_FONT_STEP,
+  applyEditorFont,
+  clampEditorFont,
+  formatEditorFont,
+  loadEditorFont,
+  loadSidebarOpen,
+  onHideSidebar,
+  saveEditorFont,
+  saveSidebarOpen,
+  viewShortcut,
+} from "./view-prefs";
 
 initTheme();
 
 const app = document.getElementById("app")!;
 let unlisten: UnlistenFn[] = [];
 let syncTimer: number | undefined;
+let cleanups: Array<() => void> = [];
+function cleanupWorkbench() {
+  for (const fn of cleanups) fn();
+  cleanups = [];
+}
 
 const RECENT_KEY = "lwp.recent";
 function recentProjects(): string[] {
@@ -35,6 +55,7 @@ function remember(root: string) {
 // ---- welcome -------------------------------------------------------------------
 
 function welcome() {
+  cleanupWorkbench();
   const openExisting = async (path?: string) => {
     const dir = path ?? (await openDialog({ directory: true, title: "Open a paper folder" }));
     if (typeof dir !== "string") return;
@@ -85,13 +106,23 @@ function welcome() {
 // ---- workbench -------------------------------------------------------------------
 
 async function workbench(info: ProjectInfo) {
+  cleanupWorkbench();
   unlisten.forEach((u) => u());
   unlisten = [];
   remember(info.root);
   document.title = `${info.title} — LetsWritePaper`;
 
   const activity = h("nav", { class: "activitybar", "aria-label": "Panels" });
-  const sidebar = h("aside", { class: "sidebar" });
+  let sidebarOpen = loadSidebarOpen();
+  const sidebar = h("aside", {
+    class: sidebarOpen ? "sidebar" : "sidebar hidden",
+    "aria-label": "Sidebar",
+  });
+  const toggleSidebarBtn = h("button", {
+    class: "icon sidebar-toggle",
+    "aria-keyshortcuts": "Control+B Meta+B",
+    onclick: () => setSidebar(!sidebarOpen),
+  }, "◀");
   const tabs = h("div", { class: "tabs", role: "tablist" });
   const editorArea = h("div", { class: "editor-area" });
   const empty = h("div", { class: "empty-editor muted" }, "Open a document from the sidebar.");
@@ -102,6 +133,33 @@ async function workbench(info: ProjectInfo) {
     h("button", { class: `rtab ${id === "preview" ? "active" : ""}`, "data-tab": id, onclick: () => showRight(id) }, label);
   const rightTabs = h("div", { class: "rtabs", role: "tablist" }, rightTab("preview", "Preview"), rightTab("claude", "◆ Assistant"));
   const rightPane = h("div", { class: "rightpane" }, rightTabs, previewEl, claudeEl);
+  const toggleRight = () => rightPane.classList.toggle("hidden");
+  let editorFont = loadEditorFont();
+  applyEditorFont(editorFont);
+  const fontSmaller = h("button", {
+    class: "icon",
+    title: "Smaller editor text (⌘/Ctrl+−)",
+    "aria-label": "Smaller editor text",
+    "aria-keyshortcuts": "Control+- Meta+-",
+    disabled: editorFont <= EDITOR_FONT_MIN,
+    onclick: () => setFont(editorFont - EDITOR_FONT_STEP),
+  }, "−");
+  const fontReadout = h("button", {
+    class: "icon font-readout",
+    title: "Reset editor text (⌘/Ctrl+0)",
+    "aria-label": "Reset editor text",
+    "aria-keyshortcuts": "Control+0 Meta+0",
+    onclick: () => setFont(EDITOR_FONT_DEFAULT),
+  }, formatEditorFont(editorFont));
+  const fontLarger = h("button", {
+    class: "icon",
+    title: "Larger editor text (⌘/Ctrl+=)",
+    "aria-label": "Larger editor text",
+    "aria-keyshortcuts": "Control+= Meta+=",
+    disabled: editorFont >= EDITOR_FONT_MAX,
+    onclick: () => setFont(editorFont + EDITOR_FONT_STEP),
+  }, "+");
+  const fontControls = h("span", { class: "font-controls" }, fontSmaller, fontReadout, fontLarger);
   const status = {
     sync: h("span", {}),
     cursor: h("span", {}),
@@ -117,14 +175,34 @@ async function workbench(info: ProjectInfo) {
     status.words,
     status.cursor,
     status.compile,
+    fontControls,
     themePicker(),
   );
-  const togglePreview = h("button", { class: "icon", title: "Toggle side pane", onclick: () => rightPane.classList.toggle("hidden") }, "◧");
-  const claudeBtn = h("button", { class: "icon", title: "Ask an assistant (⌘/Ctrl+L)", onclick: () => showRight("claude") }, "◆");
-  const main = h("main", { class: "main" }, h("div", { class: "tabbar" }, tabs, h("span", { class: "spacer" }), claudeBtn, togglePreview), editorArea);
+  const togglePreview = h("button", {
+    class: "icon",
+    title: "Toggle side pane (⌘/Ctrl+\\)",
+    "aria-label": "Toggle side pane",
+    onclick: () => toggleRight(),
+  }, "◧");
+  const claudeBtn = h("button", { class: "icon", title: "Ask an assistant (⌘/Ctrl+L tags this section)", onclick: () => showRight("claude") }, "◆");
+  const main = h(
+    "main",
+    { class: "main" },
+    h("div", { class: "tabbar" }, toggleSidebarBtn, h("span", { class: "tabbar-sep" }), tabs, h("span", { class: "spacer" }), claudeBtn, togglePreview),
+    editorArea,
+  );
   clear(app, h("div", { class: "workbench" }, activity, sidebar, main, rightPane), statusbar);
 
   const editors = new Editors(tabs, editorArea, info.me);
+  const setFont = (size: number) => {
+    editorFont = clampEditorFont(size);
+    applyEditorFont(editorFont);
+    saveEditorFont(editorFont);
+    fontReadout.textContent = formatEditorFont(editorFont);
+    fontSmaller.disabled = editorFont <= EDITOR_FONT_MIN;
+    fontLarger.disabled = editorFont >= EDITOR_FONT_MAX;
+    editors.remeasure();
+  };
   const preview = new Preview(previewEl);
   let outlineCache: { path: string; sections: Section[] } | null = null;
   let cursorLine = 1;
@@ -135,7 +213,7 @@ async function workbench(info: ProjectInfo) {
     const selection = editors.selectionText();
     return { path, line: path ? cursorLine : undefined, section: section?.title, selection: selection || undefined };
   };
-  const claude = new ClaudePanel(claudeEl, editorContext, info.title);
+  const claude = new ClaudePanel(claudeEl, editorContext, info.title, () => editors.listDocs());
   const showRight = (id: "preview" | "claude") => {
     rightPane.classList.remove("hidden");
     previewEl.classList.toggle("hidden", id !== "preview");
@@ -168,11 +246,17 @@ async function workbench(info: ProjectInfo) {
       ...PANELS.map((p) =>
         h("button", {
           class: `activity ${p.id === panel ? "active" : ""}`,
-          title: p.label,
+          title: p.id !== panel ? p.label : sidebarOpen ? `${p.label} — hide sidebar (⌘/Ctrl+B)` : `${p.label} — show sidebar (⌘/Ctrl+B)`,
           "aria-label": p.label,
+          "aria-expanded": p.id === panel && sidebarOpen ? "true" : "false",
           onclick: () => {
+            if (p.id === panel && sidebarOpen) {
+              setSidebar(false);
+              return;
+            }
             panel = p.id;
-            renderActivity();
+            if (!sidebarOpen) setSidebar(true);
+            else renderActivity();
             refresh();
           },
         }, p.icon),
@@ -190,7 +274,23 @@ async function workbench(info: ProjectInfo) {
         },
       }, "⏏"),
     );
-  renderActivity();
+  const paintChrome = () => {
+    const sidebarLabel = sidebarOpen ? "Hide sidebar" : "Show sidebar";
+    toggleSidebarBtn.textContent = sidebarOpen ? "◀" : "▶";
+    toggleSidebarBtn.title = `${sidebarLabel} (⌘/Ctrl+B)`;
+    toggleSidebarBtn.setAttribute("aria-label", sidebarLabel);
+    toggleSidebarBtn.setAttribute("aria-pressed", sidebarOpen ? "true" : "false");
+    empty.textContent = sidebarOpen ? "Open a document from the sidebar." : "Sidebar is hidden — ⌘B or Ctrl+B shows it.";
+  };
+  const setSidebar = (open: boolean) => {
+    sidebarOpen = open;
+    sidebar.classList.toggle("hidden", !open);
+    sidebar.toggleAttribute("aria-hidden", !open);
+    saveSidebarOpen(open);
+    paintChrome();
+    renderActivity();
+  };
+  setSidebar(sidebarOpen);
 
   const updateSync = async () => {
     const share = await api.shareInfo().catch(() => null);
@@ -256,6 +356,80 @@ async function workbench(info: ProjectInfo) {
   preview.beforeCompile = () => editors.flushAll();
   const compileNow = () => preview.compile();
 
+  cleanups.push(onHideSidebar(() => setSidebar(false)));
+  let wheelPending = 0;
+  let wheelTimer: number | undefined;
+  const onKey = (e: KeyboardEvent) => {
+    if (e.isComposing || e.key === "Process") return;
+    if (document.querySelector(".overlay")) return;
+    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      e.preventDefault();
+      void compileNow();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l") {
+      e.preventDefault();
+      showRight("claude");
+      if (!e.shiftKey) void refreshOutlineCache(editors.active).then(() => claude.tagCursorSection());
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      void editors.toggleBlame();
+      return;
+    }
+    const shortcut = viewShortcut(e);
+    if (!shortcut) return;
+    e.preventDefault();
+    switch (shortcut) {
+      case "sidebar":
+        setSidebar(!sidebarOpen);
+        break;
+      case "right-pane":
+        toggleRight();
+        break;
+      case "font-up":
+        setFont(editorFont + EDITOR_FONT_STEP);
+        break;
+      case "font-down":
+        setFont(editorFont - EDITOR_FONT_STEP);
+        break;
+      case "font-reset":
+        setFont(EDITOR_FONT_DEFAULT);
+        break;
+    }
+  };
+  const onWheel = (e: WheelEvent) => {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    if (document.querySelector(".overlay")) return;
+    e.preventDefault();
+    const dy =
+      e.deltaMode === WheelEvent.DOM_DELTA_LINE ? e.deltaY * 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? e.deltaY * 400 : e.deltaY;
+    wheelPending += dy;
+    window.clearTimeout(wheelTimer);
+    wheelTimer = window.setTimeout(() => {
+      wheelPending = 0;
+    }, 180);
+    const stepPx = 60;
+    if (Math.abs(wheelPending) < stepPx) return;
+    const steps = Math.trunc(wheelPending / stepPx);
+    wheelPending -= steps * stepPx;
+    const dir = steps > 0 ? -1 : 1;
+    const count = Math.min(Math.abs(steps), 3);
+    const overPreview =
+      !previewEl.classList.contains("hidden") && !rightPane.classList.contains("hidden") && e.target instanceof Node && previewEl.contains(e.target);
+    if (overPreview) preview.nudgeZoom(dir * 0.1 * count);
+    else setFont(editorFont + dir * count);
+  };
+  window.addEventListener("keydown", onKey, true);
+  window.addEventListener("wheel", onWheel, { capture: true, passive: false });
+  cleanups.push(() => {
+    window.removeEventListener("keydown", onKey, true);
+    window.removeEventListener("wheel", onWheel, true);
+    window.clearTimeout(wheelTimer);
+  });
+
   // Live events from the workspace (agents, other windows, files on disk).
   let metaTimer: number | undefined;
   const blameTimers = new Map<string, number>();
@@ -288,21 +462,6 @@ async function workbench(info: ProjectInfo) {
       }, 300);
     }),
   );
-
-  window.onkeydown = (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-      e.preventDefault();
-      void compileNow();
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l") {
-      e.preventDefault();
-      showRight("claude");
-    }
-    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "b") {
-      e.preventDefault();
-      void editors.toggleBlame();
-    }
-  };
 
   refresh();
   if (info.documents.includes(info.main)) await ctx.openDoc(info.main);

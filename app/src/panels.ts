@@ -4,6 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, type Change, type DocDiff, type LogEntry, type ProjectInfo, type Proposal, type ReviewComment, type ReviewRound } from "./api";
 import type { Editors } from "./editor";
 import { authorBadge, clear, form, guard, h, showModal, timeAgo, toast } from "./ui";
+import { requestHideSidebar } from "./view-prefs";
 
 export interface PanelContext {
   info: ProjectInfo;
@@ -45,7 +46,19 @@ export async function renderPanel(id: PanelId, el: HTMLElement, ctx: PanelContex
 }
 
 function header(title: string, ...actions: HTMLElement[]) {
-  return h("div", { class: "panel-header" }, h("h3", {}, title), h("span", { class: "spacer" }), ...actions);
+  return h(
+    "div",
+    { class: "panel-header" },
+    h("h3", {}, title),
+    h("span", { class: "spacer" }),
+    ...actions,
+    h("button", {
+      class: "icon",
+      title: "Hide sidebar (⌘/Ctrl+B)",
+      "aria-label": "Hide sidebar",
+      onclick: () => requestHideSidebar(),
+    }, "×"),
+  );
 }
 
 function section(title: string, ...children: (Node | null)[]) {

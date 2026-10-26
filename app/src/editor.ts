@@ -240,11 +240,19 @@ export class Editors {
     if (line) this.goto(line);
   }
 
+  /** Recompute line heights after the editor font size changes. */
+  remeasure() {
+    const view = this.active ? this.docs.get(this.active)?.view : undefined;
+    view?.requestMeasure();
+  }
+
   private activate(path: string) {
     this.active = path;
     for (const d of this.docs.values()) d.host.classList.toggle("hidden", d.path !== path);
     this.renderTabs();
-    this.docs.get(path)?.view.focus();
+    const view = this.docs.get(path)?.view;
+    view?.requestMeasure();
+    view?.focus();
     this.onActivate(path);
   }
 

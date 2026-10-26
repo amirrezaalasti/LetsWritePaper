@@ -193,12 +193,29 @@ struct ChatEvent {
     event: Value,
 }
 
+#[derive(Deserialize, Default, Clone)]
+pub struct ContextMention {
+    /// `section` or `file`.
+    pub kind: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub section: Option<String>,
+    #[serde(default)]
+    pub line: Option<usize>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 pub struct EditorContext {
     pub path: Option<String>,
     pub line: Option<usize>,
     pub section: Option<String>,
     pub selection: Option<String>,
+    /// Sections and files the user tagged with ⌘/Ctrl+L or @.
+    #[serde(default)]
+    pub mentions: Vec<ContextMention>,
 }
 
 /// A file pasted or attached in the composer. `data` is standard base64.
@@ -1045,7 +1062,8 @@ fn message_text(text: &str, ctx: &EditorContext, instructions: bool) -> String {
         content.push_str(SYSTEM_PROMPT);
         content.push_str("\n\n");
     }
-    if ctx.path.is_some() || ctx.selection.is_some() {
+    let mentions = mention_block(ctx);
+    if ctx.path.is_some() || ctx.selection.is_some() || !mentions.is_empty() {
         content.push_str("<editor_context>\n");
         if let Some(p) = &ctx.path {
             content.push_str(&format!("The user is viewing {p}"));
@@ -1060,6 +1078,7 @@ fn message_text(text: &str, ctx: &EditorContext, instructions: bool) -> String {
         if let Some(sel) = ctx.selection.as_ref().filter(|s| !s.trim().is_empty()) {
             content.push_str(&format!("Selected text:\n```\n{sel}\n```\n"));
         }
+        content.push_str(&mentions);
         content.push_str("</editor_context>\n\n");
     }
     content.push_str(text);
@@ -1430,6 +1449,51 @@ fn format_reset(raw: &str) -> String {
         date.to_string()
     } else {
         format!("{date} {time}{zone}")
+    }
+}
+
+fn mention_block(ctx: &EditorContext) -> String {
+    let known: Vec<&ContextMention> = ctx
+        .mentions
+        .iter()
+        .filter(|mention| mention.kind == "section" || mention.kind == "file")
+        .collect();
+    if known.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("The user tagged:\n");
+    for mention in known {
+        let path = mention.path.as_deref().unwrap_or("(unknown file)");
+        if mention.kind == "section" {
+            let section = mention.section.as_deref().unwrap_or("(untitled)");
+            out.push_str(&format!("- section \"{section}\" in {path}"));
+        } else {
+            out.push_str(&format!("- file {path}"));
+        }
+        if let Some(line) = mention.line {
+            out.push_str(&format!(" near line {line}"));
+        }
+        out.push('\n');
+        if let Some(text) = mention.text.as_ref().filter(|text| !text.trim().is_empty()) {
+            out.push_str(if mention.kind == "section" {
+                "  Selected text in that section:\n```\n"
+            } else {
+                "  Selected text:\n```\n"
+            });
+            out.push_str(&clip_mention(text));
+            out.push_str("\n```\n");
+        }
+    }
+    out
+}
+
+fn clip_mention(text: &str) -> String {
+    let mut chars = text.chars();
+    let clipped: String = chars.by_ref().take(8000).collect();
+    if chars.next().is_some() {
+        format!("{clipped}\n…(truncated)")
+    } else {
+        clipped
     }
 }
 
@@ -2303,6 +2367,7 @@ mod tests {
             line: Some(4),
             section: None,
             selection: None,
+            mentions: vec![],
         };
         let line = outbound_line("claude", "What is this figure?", &ctx, &files);
         let blocks = &line["message"]["content"];
@@ -2333,6 +2398,33 @@ mod tests {
         assert_eq!(slash_name("/usage"), Some("usage"));
         assert_eq!(slash_name("/plugin list"), Some("plugin"));
         assert!(slash_name("rewrite this section").is_none());
+        let tagged = message_text(
+            "Tighten this.",
+            &EditorContext {
+                mentions: vec![
+                    ContextMention {
+                        kind: "section".into(),
+                        path: Some("main.tex".into()),
+                        section: Some("Introduction".into()),
+                        line: Some(12),
+                        text: Some("prior work".into()),
+                    },
+                    ContextMention {
+                        kind: "file".into(),
+                        path: Some("refs.bib".into()),
+                        section: None,
+                        line: None,
+                        text: None,
+                    },
+                ],
+                ..EditorContext::default()
+            },
+            false,
+        );
+        assert!(tagged.contains("section \"Introduction\" in main.tex near line 12"), "{tagged}");
+        assert!(tagged.contains("prior work"), "{tagged}");
+        assert!(tagged.contains("file refs.bib"), "{tagged}");
+        assert!(tagged.contains("Tighten this."), "{tagged}");
         prepare_attachments(&dir, &[attachment("again.txt", "text/plain", b"ok")]).unwrap();
         let ignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
         assert_eq!(ignore.matches(".paper/attachments/").count(), 1, "{ignore}");
