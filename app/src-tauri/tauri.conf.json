@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LetsWritePaper",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "identifier": "dev.letswritepaper.app",
   "build": {
     "frontendDist": "../dist",
@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "category": "Productivity",
     "shortDescription": "Version control, live co-editing and AI collaboration for academic papers",
@@ -37,6 +38,15 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhBMjBEQTdFMDk5QTY5QjIKUldTeWFab0pmdG9naWxhRVhJdmVjM3cycy9BYUV2aXpmVWIybFVIVENjZHdhcmRPamtvREhUSDcK",
+      "endpoints": ["https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

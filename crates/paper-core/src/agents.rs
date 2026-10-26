@@ -89,7 +89,7 @@ pub fn ingest_from_hook(payload: &str, author: &Author) -> Result<Option<String>
         (false, Some(c)) => c.join(file),
         (false, None) => std::env::current_dir()?.join(file),
     };
-    let abs = abs.canonicalize().unwrap_or(abs);
+    let abs = dunce::canonicalize(&abs).unwrap_or(abs);
     let Some(dir) = abs.parent() else {
         return Ok(None);
     };

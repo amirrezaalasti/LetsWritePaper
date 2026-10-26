@@ -9,6 +9,7 @@ import { Preview } from "./preview";
 import { initTheme, themePicker } from "./themes";
 import { setupWizard } from "./setup";
 import { authorBadge, clear, form, guard, h, toast } from "./ui";
+import { checkForUpdates } from "./updates";
 import {
   EDITOR_FONT_DEFAULT,
   EDITOR_FONT_MAX,
@@ -483,3 +484,5 @@ void api
     else openOrWelcome();
   })
   .catch(() => openOrWelcome());
+
+void checkForUpdates();

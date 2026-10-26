@@ -1,7 +1,7 @@
 {
   "name": "letswritepaper-app",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -22,6 +22,8 @@
     "@tauri-apps/api": "2.12.4",
     "@tauri-apps/plugin-dialog": "2.8.3",
     "@tauri-apps/plugin-opener": "2.7.2",
+    "@tauri-apps/plugin-process": "2.4.0",
+    "@tauri-apps/plugin-updater": "2.14.0",
     "pdfjs-dist": "6.4.299",
     "yjs": "13.6.33"
   },

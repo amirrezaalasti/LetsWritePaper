@@ -115,7 +115,7 @@ pub struct Project {
 impl Project {
     /// Find the project containing `start` by walking up to the nearest `paper.toml`.
     pub fn discover(start: &Path) -> Result<Self> {
-        let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+        let start = dunce::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
         let mut dir = Some(start.as_path());
         while let Some(d) = dir {
             if d.join(MANIFEST).is_file() {
@@ -131,7 +131,7 @@ impl Project {
             .map_err(|_| Error::NoProject(root.to_path_buf()))?;
         let manifest: Manifest =
             toml::from_str(&text).map_err(|e| Error::Manifest(e.to_string()))?;
-        let root = root.canonicalize()?;
+        let root = dunce::canonicalize(root)?;
         std::fs::create_dir_all(root.join(STATE_DIR))?;
         Ok(Project { root, manifest })
     }

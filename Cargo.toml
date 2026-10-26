@@ -4,7 +4,7 @@ members = ["crates/*", "app/src-tauri"]
 default-members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 rust-version = "1.95"
@@ -29,3 +29,4 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 globset = "0.4"
 base64 = "0.22"
+dunce = "1"

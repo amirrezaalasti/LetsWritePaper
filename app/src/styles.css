@@ -1232,6 +1232,11 @@ del {
 .modal-scroll {
   overflow: auto;
 }
+.update-notes {
+  white-space: pre-wrap;
+  font: inherit;
+  color: var(--fg-2);
+}
 .modal-actions {
   display: flex;
   justify-content: flex-end;

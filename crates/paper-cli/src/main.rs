@@ -436,7 +436,7 @@ fn run(cli: Cli) -> Result<()> {
             let mut ws = open(&cli, Ownership::Never)?;
             let file = path.clone().ok_or_else(|| anyhow!("path required"))?;
             let abs = std::env::current_dir()?.join(&file);
-            let abs = abs.canonicalize().unwrap_or(abs);
+            let abs = dunce::canonicalize(&abs).unwrap_or(abs);
             let rel = ws.project.relative(&abs).ok_or_else(|| anyhow!("{file} is outside the project"))?;
             match ws.ingest_file(&rel, &me, Some("ingested from disk"))? {
                 Some(id) => println!("Recorded {rel} as #{id} by {}", me.name),
@@ -608,7 +608,7 @@ fn watch(cli: &Cli) -> Result<()> {
 
 /// Configure Claude Code (and other MCP agents) for this project.
 fn write_agent_config(project: &Project) -> Result<()> {
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let exe = dunce::canonicalize(std::env::current_exe()?)?;
     let written = paper_core::agents::write_agent_config(project, &paper_core::agents::Launcher { exe: &exe })?;
     println!("Agent setup: {}", written.join(", "));
     Ok(())

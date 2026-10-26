@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Main window permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default", "opener:default"]
+  "permissions": ["core:default", "dialog:default", "opener:default", "updater:default", "process:allow-restart"]
 }

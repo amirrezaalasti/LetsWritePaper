@@ -19,6 +19,7 @@ time.workspace = true
 dirs.workspace = true
 globset.workspace = true
 base64.workspace = true
+dunce.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

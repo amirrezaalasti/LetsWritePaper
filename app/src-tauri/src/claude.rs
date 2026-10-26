@@ -1131,7 +1131,6 @@ fn slash_name(text: &str) -> Option<&str> {
         .trim()
         .lines()
         .next()?
-        .trim()
         .split_whitespace()
         .next()?;
     Some(token.trim_start_matches('/'))
@@ -1746,14 +1745,10 @@ fn is_text_file(media_type: &str, name: &str) -> bool {
 }
 
 fn clip_text(text: &str) -> String {
-    let mut count = 0usize;
-    for (index, _) in text.char_indices() {
-        if count == MAX_ATTACHMENT_TEXT {
-            return format!("{}\n… [truncated]", &text[..index]);
-        }
-        count += 1;
+    match text.char_indices().nth(MAX_ATTACHMENT_TEXT) {
+        Some((index, _)) => format!("{}\n… [truncated]", &text[..index]),
+        None => text.to_string(),
     }
-    text.to_string()
 }
 
 fn extension(name: &str) -> String {

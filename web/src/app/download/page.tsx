@@ -29,6 +29,15 @@ export default function DownloadPage() {
         </p>
       </section>
 
+      <section id="updates" className="mt-16 border-t border-line pt-12">
+        <h2 className="font-serif text-3xl tracking-tight">Updates</h2>
+        <p className="mt-4 max-w-2xl leading-7 text-muted">
+          From version 0.1.2 on, the app checks for a new release when it opens and offers to install it, then restarts.
+          Your papers stay where they are. If you have 0.1.1 or older, download the installer above once more and run it
+          over your current copy; there is no need to uninstall first.
+        </p>
+      </section>
+
       <section id="build" className="mt-16 border-t border-line pt-12">
         <h2 className="font-serif text-3xl tracking-tight">Build it yourself</h2>
         <p className="mt-4 max-w-2xl leading-7 text-muted">
