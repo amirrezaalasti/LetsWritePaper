@@ -16,8 +16,14 @@ export class Preview {
   private queued = false;
   private timer: number | undefined;
   private zoom = 1;
+  private fullBtn: HTMLButtonElement;
+  private downloadBtn: HTMLButtonElement;
   onDiagnosticClick: (d: Diagnostic) => void = () => {};
   onStatus: (text: string, ok: boolean | null) => void = () => {};
+  /** Opens or closes the compiled paper across the whole window. */
+  onFullView: () => void = () => {};
+  /** Saves the compiled PDF to a path the user chooses. */
+  onDownload: () => void = () => {};
   /** Runs before each compile, e.g. to flush unsent keystrokes to the workspace. */
   beforeCompile: () => Promise<unknown> = async () => {};
 
@@ -25,6 +31,28 @@ export class Preview {
     this.status = h("span", { class: "muted" }, "Not compiled");
     this.pages = h("div", { class: "preview-pages" });
     this.diags = h("div", { class: "diagnostics" });
+    this.fullBtn = h(
+      "button",
+      {
+        class: "small",
+        title: "Open the compiled paper in full view (⌘/Ctrl+Shift+\\)",
+        "aria-label": "Open the compiled paper in full view",
+        "aria-pressed": "false",
+        "aria-keyshortcuts": "Control+Shift+\\ Meta+Shift+\\",
+        onclick: () => this.onFullView(),
+      },
+      "Full view",
+    );
+    this.downloadBtn = h(
+      "button",
+      {
+        class: "small",
+        title: "Download the compiled PDF",
+        "aria-label": "Download PDF",
+        onclick: () => this.onDownload(),
+      },
+      "Download",
+    );
     clear(
       root,
       h(
@@ -33,6 +61,8 @@ export class Preview {
         h("strong", {}, "Preview"),
         this.status,
         h("span", { class: "spacer" }),
+        this.fullBtn,
+        this.downloadBtn,
         h("button", { class: "icon", title: "Zoom out (⌘/Ctrl+scroll)", onclick: () => this.setZoom(this.zoom - 0.1) }, "−"),
         h("button", { class: "icon", title: "Zoom in (⌘/Ctrl+scroll)", onclick: () => this.setZoom(this.zoom + 0.1) }, "+"),
         h("button", { title: "Compile (⌘/Ctrl+S)", onclick: () => void this.compile() }, "Compile"),
@@ -40,6 +70,19 @@ export class Preview {
       this.diags,
       this.pages,
     );
+  }
+
+  /** Updates the header control. The workbench applies the layout. */
+  setFullView(on: boolean) {
+    this.fullBtn.textContent = on ? "Editor" : "Full view";
+    this.fullBtn.title = on ? "Back to the editor (Esc)" : "Open the compiled paper in full view (⌘/Ctrl+Shift+\\)";
+    this.fullBtn.setAttribute("aria-label", on ? "Back to the editor" : "Open the compiled paper in full view");
+    this.fullBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  setDownloading(on: boolean) {
+    this.downloadBtn.disabled = on;
+    this.downloadBtn.textContent = on ? "Saving…" : "Download";
   }
 
   nudgeZoom(delta: number) {

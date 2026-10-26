@@ -477,6 +477,14 @@ pre {
 .tabbar .sidebar-toggle[aria-pressed="false"] {
   color: var(--accent);
 }
+.tabbar-action {
+  align-self: center;
+  margin-right: 6px;
+}
+.tabbar-action[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .tabs {
   display: flex;
   overflow-x: auto;
@@ -1301,6 +1309,34 @@ del {
   }
 }
 
+/* Compiled paper across the whole window. Beats the narrow-window rules above. */
+.workbench.full-preview,
+.workbench.full-preview:has(.sidebar.hidden),
+.workbench.full-preview:has(.rightpane.hidden),
+.workbench.full-preview:has(.sidebar.hidden):has(.rightpane.hidden) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.workbench.full-preview > .activitybar,
+.workbench.full-preview > .sidebar,
+.workbench.full-preview > .main {
+  display: none;
+}
+.workbench.full-preview > .rightpane {
+  border-left: none;
+}
+.workbench.full-preview .rtabs {
+  display: none;
+}
+.workbench.full-preview .preview {
+  display: flex;
+}
+.workbench.full-preview .preview-pages {
+  padding: 32px 24px 64px;
+}
+.workbench.full-preview .page {
+  width: calc(min(860px, 100%) * var(--zoom));
+}
+
 /* ---- right pane: preview / Claude ---- */
 .rightpane {
   display: flex;
@@ -1329,6 +1365,16 @@ del {
 .rtab.active {
   color: var(--fg);
   border-bottom-color: var(--accent);
+}
+.rtab.working::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: 1px;
 }
 .claude {
   flex: 1;

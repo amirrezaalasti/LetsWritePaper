@@ -496,12 +496,18 @@ type ToolRow = {
 function toolDetail(input: unknown): string {
   if (!input || typeof input !== "object") return "";
   const obj = input as Record<string, unknown>;
-  for (const key of ["query", "url", "command", "file_path", "path", "pattern", "prompt", "description", "plan"]) {
+  for (const key of ["query", "url", "command", "CommandLine", "file_path", "path", "pattern", "prompt", "description", "plan"]) {
     const value = obj[key];
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   const text = JSON.stringify(obj, null, 2);
   return text === "{}" ? "" : text;
+}
+
+function ruleFromSuggestion(suggestion: { rules?: { toolName?: string; ruleContent?: string }[] }): string | undefined {
+  const rule = Array.isArray(suggestion.rules) ? suggestion.rules.find((item) => item?.toolName) : undefined;
+  if (!rule?.toolName) return undefined;
+  return rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : rule.toolName;
 }
 
 function suggestionLabel(suggestion: { rules?: { toolName?: string; ruleContent?: string }[]; destination?: string }): string | null {
@@ -568,12 +574,19 @@ export class ClaudePanel {
   private slashTokenShown = "";
   private fileInput: HTMLInputElement;
   private streamedThisTurn = false;
+  /** The denied turn already finished, so the next result belongs to the retry. */
+  private denialSettled = false;
+  /** Ignore the result of the turn that was denied, once the retry has started. */
+  private ignoreNextResult = false;
+  /** Mode or model changed while a reply was still running. */
+  private restartWhenIdle = false;
 
   constructor(
     private root: HTMLElement,
     private context: () => EditorContext,
     private paperTitle: string,
     private listDocs: () => readonly string[],
+    private onBusy?: (busy: boolean) => void,
   ) {
     this.log = h("div", { class: "chat-log", "aria-live": "polite" });
     this.input = h("textarea", { class: "chat-input", rows: 3, placeholder: assistantMeta("claude").placeholder });
@@ -609,7 +622,7 @@ export class ClaudePanel {
         if (this.fillingModel) return;
         this.model = this.modelSelect.value;
         this.persist();
-        if (this.running) void this.restart();
+        this.requestRestart();
       },
     });
     this.fillModelSelect();
@@ -701,10 +714,12 @@ export class ClaudePanel {
       "aria-label": `What ${meta.label} may do`,
       title: this.assistant === "claude"
         ? "Paper tools: Claude edits through the paper's tools. Web search and other tools ask you to allow them here. File edits: Claude may also edit files without asking."
-        : "Paper tools: the assistant is asked to edit through the paper's tools. File edits: it may also change files directly.",
-      onchange: async () => {
+        : this.assistant === "gemini"
+          ? "Paper tools are allowed. Shell commands and other tools ask you to allow them in this chat. A reply that is already running keeps going."
+          : "Paper tools: the assistant is asked to edit through the paper's tools. File edits: it may also change files directly.",
+      onchange: () => {
         this.mode = modeSelect.value as "paper" | "edits";
-        if (this.running) await this.restart();
+        this.requestRestart();
       },
     }, h("option", { value: "paper" }, "Paper tools"), h("option", { value: "edits" }, "Paper tools + file edits"));
     const ctxToggle = h("label", { class: "check", title: "Send the open file, section and selection with each message" },
@@ -816,6 +831,18 @@ export class ClaudePanel {
     await this.ensureRunning();
   }
 
+  /** Apply a mode or model change without cutting off a reply that is in flight. */
+  private requestRestart() {
+    if (this.busy) this.restartWhenIdle = true;
+    else if (this.running) void this.restart();
+  }
+
+  private settleRestart() {
+    if (!this.restartWhenIdle || this.busy) return;
+    this.restartWhenIdle = false;
+    if (this.running) void this.restart();
+  }
+
   private async ensureRunning() {
     if (this.running) return;
     await api.claudeStart(
@@ -844,6 +871,7 @@ export class ClaudePanel {
     this.sendBtn.textContent = b ? "Stop" : "Send";
     this.sendBtn.classList.toggle("primary", !b);
     this.sendBtn.onclick = b ? () => void this.interrupt() : () => void this.submit();
+    this.onBusy?.(b);
   }
 
   private async interrupt() {
@@ -1232,6 +1260,8 @@ export class ClaudePanel {
     this.scroll();
     this.stderr = [];
     this.streamedThisTurn = false;
+    this.denialSettled = false;
+    this.ignoreNextResult = false;
     this.setBusy(true);
     try {
       await this.ensureRunning();
@@ -1415,8 +1445,14 @@ export class ClaudePanel {
         }
         break;
       case "result":
+        if (this.ignoreNextResult) {
+          this.ignoreNextResult = false;
+          break;
+        }
+        this.denialSettled = true;
         this.setBusy(false);
         this.onResult(ev);
+        this.settleRestart();
         break;
       case "control_request":
         this.onControl(ev);
@@ -1553,14 +1589,16 @@ export class ClaudePanel {
       status,
     );
     const base = { request_id: requestId, tool_use_id: typeof req.tool_use_id === "string" ? req.tool_use_id : undefined };
+    const allowRule = typeof req.allow_rule === "string" ? req.allow_rule : undefined;
     actions.append(
-      h("button", { class: "primary small", onclick: () => void this.decide(card, { ...base, behavior: "allow", decision: "user_temporary" }, "Allowed") }, "Allow"),
+      h("button", { class: "primary small", onclick: () => void this.decide(card, { ...base, behavior: "allow", decision: "user_temporary", allow_rule: allowRule }, "Allowed") }, "Allow"),
     );
     if (!req.suppress_always_allow_rule && Array.isArray(req.permission_suggestions)) {
       for (const suggestion of req.permission_suggestions) {
         if (suggestion?.behavior !== "allow") continue;
         const label = suggestionLabel(suggestion);
         if (!label) continue;
+        const alwaysRule = ruleFromSuggestion(suggestion) ?? allowRule;
         actions.append(
           h("button", {
             class: "small",
@@ -1569,6 +1607,7 @@ export class ClaudePanel {
               behavior: "allow",
               decision: "user_permanent",
               updated_permissions: [suggestion],
+              allow_rule: alwaysRule,
             }, "Allowed"),
           }, label),
         );
@@ -1693,6 +1732,12 @@ export class ClaudePanel {
       if (reply.request_id) this.prompts.delete(reply.request_id);
       const status = card?.querySelector(".perm-status");
       if (status) status.textContent = label;
+      if (this.assistant === "gemini" && reply.behavior === "allow") {
+        if (!this.denialSettled) this.ignoreNextResult = true;
+        this.denialSettled = false;
+        for (const [id] of [...this.prompts]) this.cancelPrompt(id);
+        this.setBusy(true);
+      }
     } catch (e) {
       controls.forEach((el) => (el.disabled = false));
       this.error(String(e));

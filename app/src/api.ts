@@ -244,6 +244,8 @@ export interface ClaudePermissionReply {
   updated_input?: unknown;
   updated_permissions?: unknown;
   decision?: "user_temporary" | "user_permanent" | "user_reject";
+  /** Antigravity allow-rule, such as `command(echo)`. Claude leaves this unset. */
+  allow_rule?: string;
 }
 
 export interface ContextMention {
@@ -377,7 +379,7 @@ export const api = {
   ) => invoke<string>("claude_terminal", { action, session, chat_id, provider, foundry_resource, assistant }),
 
   compile: (main?: string) => invoke<CompileResult>("compile", { main }),
-  exportPdf: () => invoke<string>("export_pdf"),
+  exportPdf: (dest: string) => invoke<string>("export_pdf", { dest }),
 };
 
 export const events = {

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -76,6 +76,16 @@ fn default_assistant() -> String {
     "claude".into()
 }
 
+/// What a Gemini chat was started with, so an allow can restart that same chat.
+#[derive(Clone)]
+struct AgyLaunch {
+    root: std::path::PathBuf,
+    model: String,
+    mode: String,
+    use_api_key: bool,
+    api_key: String,
+}
+
 struct Chat {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
@@ -85,6 +95,9 @@ struct Chat {
     codex_mode: String,
     /// The `codex exec` process for the turn in flight, if any.
     codex_run: Arc<Mutex<Option<Child>>>,
+    /// Bumped when Gemini is restarted so the old reader does not report an exit.
+    generation: u64,
+    agy: Option<AgyLaunch>,
 }
 
 #[derive(Default)]
@@ -108,6 +121,9 @@ pub struct PermissionReply {
     pub updated_permissions: Option<Value>,
     #[serde(default)]
     pub decision: Option<String>,
+    /// Antigravity allow-rule chosen in the chat, such as `command(echo)`.
+    #[serde(default)]
+    pub allow_rule: Option<String>,
 }
 
 fn write_line(
@@ -627,7 +643,7 @@ impl ClaudeChats {
         match crate::assistants::normalize(assistant) {
             "chatgpt" => return self.start_codex(chat_id, resume, mode, model),
             "gemini" => {
-                return self.start_agy(app, root, chat_id, resume, model, provider, api_key)
+                return self.start_agy(app, root, chat_id, resume, mode, model, provider, api_key)
             }
             _ => {}
         }
@@ -685,6 +701,8 @@ impl ClaudeChats {
                 codex_model: String::new(),
                 codex_mode: String::new(),
                 codex_run: Arc::new(Mutex::new(None)),
+                generation: 0,
+                agy: None,
             },
         );
 
@@ -759,9 +777,50 @@ impl ClaudeChats {
     }
 
     /// Write the user's allow or deny back to the CLI, which is blocked on it.
-    pub fn permission(&self, chat_id: &str, reply: &PermissionReply) -> Result<(), String> {
+    /// Gemini has no blocking prompt: an allow is saved and the same chat is
+    /// restarted so the new process actually grants it.
+    pub fn permission(
+        &self,
+        app: &AppHandle,
+        chat_id: &str,
+        reply: &PermissionReply,
+    ) -> Result<(), String> {
+        let assistant = {
+            let chats = self.chats.lock().unwrap();
+            chats
+                .get(chat_id)
+                .map(|chat| chat.assistant.clone())
+                .ok_or("this chat is not running")?
+        };
+        if assistant == "gemini" {
+            return self.gemini_permission(app, chat_id, reply);
+        }
         let line = serde_json::to_string(&control_response(reply)?).map_err(|e| e.to_string())?;
         write_line(&self.chats, chat_id, &line)
+    }
+
+    fn gemini_permission(
+        &self,
+        app: &AppHandle,
+        chat_id: &str,
+        reply: &PermissionReply,
+    ) -> Result<(), String> {
+        if reply.behavior != "allow" {
+            return Ok(());
+        }
+        let rule = reply
+            .allow_rule
+            .as_deref()
+            .map(str::trim)
+            .filter(|rule| !rule.is_empty())
+            .ok_or("This permission has no allow rule.")?;
+        let path =
+            crate::assistants::settings_path().ok_or("Could not find Antigravity settings.")?;
+        crate::assistants::grant_allow_rule(&path, rule)?;
+        let retry = format!(
+            "The user allowed `{rule}`. Retry the action that was just denied. Do not ask again."
+        );
+        self.restart_agy(app, chat_id, &retry)
     }
 
     fn start_codex(
@@ -784,6 +843,8 @@ impl ClaudeChats {
                 codex_model: model.unwrap_or("").to_string(),
                 codex_mode: mode.to_string(),
                 codex_run: Arc::new(Mutex::new(None)),
+                generation: 0,
+                agy: None,
             },
         );
         Ok(())
@@ -796,38 +857,28 @@ impl ClaudeChats {
         root: &Path,
         chat_id: &str,
         resume: Option<&str>,
+        mode: &str,
         model: Option<&str>,
         provider: Option<&str>,
         api_key: Option<&str>,
     ) -> Result<(), String> {
-        let agy = find_named(crate::assistants::bin_names("gemini"))
-            .ok_or("Antigravity is not installed")?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         crate::assistants::ensure_workspace_mcp(root, &exe.display().to_string(), "gemini")?;
         let use_api_key = provider == Some("apikey");
         if let Some(path) = crate::assistants::settings_path() {
             crate::assistants::set_model_provider(&path, use_api_key)?;
+            crate::assistants::grant_allow_rule(&path, crate::assistants::PAPER_ALLOW_RULE)?;
         }
-        let mut cmd = Command::new(agy);
-        cmd.current_dir(root)
-            .env("PATH", child_path())
-            .env("PAPER_AGENT", "gemini")
-            .args(crate::assistants::agy_args(resume, model));
-        if use_api_key {
-            if let Some(key) = nonempty(api_key) {
-                cmd.env("GEMINI_API_KEY", key);
-            }
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("could not start Antigravity: {e}"))?;
-        let stdin = child.stdin.take().ok_or("no stdin")?;
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        let stderr = child.stderr.take();
+        let launch = AgyLaunch {
+            root: root.to_path_buf(),
+            model: model.unwrap_or("").to_string(),
+            mode: mode.to_string(),
+            use_api_key,
+            api_key: nonempty(api_key).unwrap_or("").to_string(),
+        };
         let session_id = Arc::new(Mutex::new(resume.map(str::to_string)));
+        let generation = 1;
+        let (stdin, stdout, stderr, child) = spawn_agy_child(&launch, resume)?;
         self.chats.lock().unwrap().insert(
             chat_id.to_string(),
             Chat {
@@ -836,12 +887,80 @@ impl ClaudeChats {
                 session_id: session_id.clone(),
                 assistant: "gemini".into(),
                 codex_model: String::new(),
-                codex_mode: String::new(),
+                codex_mode: mode.to_string(),
                 codex_run: Arc::new(Mutex::new(None)),
+                generation,
+                agy: Some(launch),
             },
         );
-        watch_output(app, chat_id, root, stdout, stderr, session_id);
+        watch_output(
+            app,
+            chat_id,
+            root,
+            stdout,
+            stderr,
+            session_id,
+            Arc::clone(&self.chats),
+            generation,
+        );
         Ok(())
+    }
+
+    /// Stop the current Gemini process and start it again on the same
+    /// conversation, then send `retry`. A saved allow-rule is only read at
+    /// startup, so the retry has to be a new process.
+    fn restart_agy(&self, app: &AppHandle, chat_id: &str, retry: &str) -> Result<(), String> {
+        let (launch, session_id, generation, child) = {
+            let mut chats = self.chats.lock().unwrap();
+            let chat = chats.get_mut(chat_id).ok_or("this chat is not running")?;
+            let launch = chat.agy.clone().ok_or("this chat is not Gemini")?;
+            chat.generation = chat.generation.wrapping_add(1);
+            let generation = chat.generation;
+            let session_id = Arc::clone(&chat.session_id);
+            let child = chat.child.take();
+            chat.stdin.take();
+            (launch, session_id, generation, child)
+        };
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(path) = crate::assistants::settings_path() {
+            crate::assistants::grant_allow_rule(&path, crate::assistants::PAPER_ALLOW_RULE)?;
+        }
+        let resume = session_id.lock().unwrap().clone();
+        let (stdin, stdout, stderr, child) = spawn_agy_child(&launch, resume.as_deref())?;
+        {
+            let mut chats = self.chats.lock().unwrap();
+            let chat = chats.get_mut(chat_id).ok_or("this chat is not running")?;
+            if chat.generation != generation {
+                drop(stdin);
+                drop(stdout);
+                drop(stderr);
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("this chat restarted".into());
+            }
+            chat.child = Some(child);
+            chat.stdin = Some(stdin);
+        }
+        watch_output(
+            app,
+            chat_id,
+            &launch.root,
+            stdout,
+            stderr,
+            session_id,
+            Arc::clone(&self.chats),
+            generation,
+        );
+        let line = serde_json::to_string(&json!({
+            "event": "user",
+            "message": { "content": retry }
+        }))
+        .map_err(|e| e.to_string())?;
+        write_line(&self.chats, chat_id, &line)
     }
 
     pub fn send(
@@ -1135,12 +1254,7 @@ fn slash_name(text: &str) -> Option<&str> {
     if !is_slash_command(text) {
         return None;
     }
-    let token = text
-        .trim()
-        .lines()
-        .next()?
-        .split_whitespace()
-        .next()?;
+    let token = text.trim().lines().next()?.split_whitespace().next()?;
     Some(token.trim_start_matches('/'))
 }
 
@@ -1824,14 +1938,48 @@ fn safe_file_name(name: &str) -> String {
     clean
 }
 
+fn spawn_agy_child(
+    launch: &AgyLaunch,
+    resume: Option<&str>,
+) -> Result<(ChildStdin, ChildStdout, Option<ChildStderr>, Child), String> {
+    let agy =
+        find_named(crate::assistants::bin_names("gemini")).ok_or("Antigravity is not installed")?;
+    let mut cmd = Command::new(agy);
+    cmd.current_dir(&launch.root)
+        .env("PATH", child_path())
+        .env("PAPER_AGENT", "gemini")
+        .args(crate::assistants::agy_args(
+            resume,
+            nonempty(Some(&launch.model)),
+            &launch.mode,
+        ));
+    if launch.use_api_key && !launch.api_key.is_empty() {
+        cmd.env("GEMINI_API_KEY", &launch.api_key);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start Antigravity: {e}"))?;
+    let stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take();
+    Ok((stdin, stdout, stderr, child))
+}
+
 /// Read an Antigravity stream and emit it as panel events.
+/// `generation` belongs to this process. A newer one means the chat restarted
+/// on purpose, so this reader must not tell the panel the chat exited.
 fn watch_output(
     app: &AppHandle,
     chat_id: &str,
     root: &Path,
-    stdout: std::process::ChildStdout,
-    stderr: Option<std::process::ChildStderr>,
+    stdout: ChildStdout,
+    stderr: Option<ChildStderr>,
     session_id: Arc<Mutex<Option<String>>>,
+    chats: Arc<Mutex<HashMap<String, Chat>>>,
+    generation: u64,
 ) {
     if let Some(stderr) = stderr {
         let (app3, id3) = (app.clone(), chat_id.to_string());
@@ -1901,13 +2049,16 @@ fn watch_output(
                 );
             }
         }
-        let _ = app2.emit(
-            "claude://event",
-            ChatEvent {
-                chat_id: id2,
-                event: json!({ "type": "exit" }),
-            },
-        );
+        let current = chats.lock().unwrap().get(&id2).map(|chat| chat.generation);
+        if current == Some(generation) {
+            let _ = app2.emit(
+                "claude://event",
+                ChatEvent {
+                    chat_id: id2,
+                    event: json!({ "type": "exit" }),
+                },
+            );
+        }
     });
 }
 
@@ -2312,6 +2463,7 @@ mod tests {
             updated_input: None,
             updated_permissions: None,
             decision: None,
+            allow_rule: None,
         }
     }
 
@@ -2448,7 +2600,10 @@ mod tests {
             },
             None,
         );
-        assert!(tagged.contains("section \"Introduction\" in main.tex near line 12"), "{tagged}");
+        assert!(
+            tagged.contains("section \"Introduction\" in main.tex near line 12"),
+            "{tagged}"
+        );
         assert!(tagged.contains("prior work"), "{tagged}");
         assert!(tagged.contains("file refs.bib"), "{tagged}");
         assert!(tagged.contains("Tighten this."), "{tagged}");

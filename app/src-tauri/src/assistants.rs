@@ -106,18 +106,25 @@ pub fn codex_args(
     args
 }
 
-/// Antigravity's persistent stdin session. Headless mode cannot ask, so tool
-/// calls are pre-approved; otherwise the paper server would be soft-denied.
-pub fn agy_args(resume: Option<&str>, model: Option<&str>) -> Vec<String> {
+/// Antigravity's persistent stdin session.
+///
+/// Headless mode cannot show a prompt: a tool that still needs approval is
+/// denied, and the chat asks instead. `edits` auto-approves workspace file
+/// edits. Paper tools are allowed separately, in settings, not by skipping
+/// every permission.
+pub fn agy_args(resume: Option<&str>, model: Option<&str>, mode: &str) -> Vec<String> {
     let mut args = vec![
         "--input-format".into(),
         "stream-json".into(),
         "--output-format".into(),
         "stream-json".into(),
-        "--dangerously-skip-permissions".into(),
         "--print-timeout".into(),
         "30m".into(),
     ];
+    if mode == "edits" {
+        args.push("--mode".into());
+        args.push("accept-edits".into());
+    }
     if let Some(id) = resume.map(str::trim).filter(|id| !id.is_empty()) {
         args.push("--conversation".into());
         args.push(id.to_string());
@@ -127,6 +134,158 @@ pub fn agy_args(resume: Option<&str>, model: Option<&str>) -> Vec<String> {
         args.push(model.to_string());
     }
     args
+}
+
+/// Paper MCP tools are the assistant's normal way of editing. Other tools
+/// still ask in the chat.
+pub const PAPER_ALLOW_RULE: &str = "mcp(paper/*)";
+
+/// Add one Antigravity allow-rule, leaving every other setting in place.
+/// A running process does not notice the change; the caller restarts it.
+pub fn grant_allow_rule(path: &Path, rule: &str) -> Result<(), String> {
+    let rule = rule.trim();
+    if rule.is_empty() || rule.contains(['\n', '\0']) {
+        return Err("invalid permission rule".into());
+    }
+    let mut value = match std::fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => json!({}),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(e.to_string()),
+    };
+    let obj = value
+        .as_object_mut()
+        .ok_or("Antigravity settings must be a JSON object")?;
+    let perms = obj.entry("permissions").or_insert_with(|| json!({}));
+    let perms = perms
+        .as_object_mut()
+        .ok_or("permissions must be an object")?;
+    let allow = perms.entry("allow").or_insert_with(|| json!([]));
+    let allow = allow
+        .as_array_mut()
+        .ok_or("permissions.allow must be an array")?;
+    if !allow.iter().any(|item| item.as_str() == Some(rule)) {
+        allow.push(json!(rule));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn is_permission_denial(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("permission")
+        && (message.contains("denied")
+            || message.contains("not allowed")
+            || message.contains("requires approval")
+            || message.contains("cannot prompt"))
+}
+
+fn command_token(command: &str) -> Option<&str> {
+    let command = command.trim();
+    let token = command.split_whitespace().next().unwrap_or(command);
+    if token.is_empty() || token.contains(['(', ')', '\n']) {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+/// The allow-rule that would have let this tool run.
+/// `broad` is the "always" form (`command(echo)`); otherwise the exact command.
+pub fn agy_allow_rule(tool: &str, input: &Value, broad: bool) -> Option<String> {
+    let paper = tool
+        .strip_prefix("mcp__paper__")
+        .filter(|name| !name.is_empty());
+    if let Some(name) = paper {
+        return Some(if broad {
+            PAPER_ALLOW_RULE.to_string()
+        } else {
+            format!("mcp(paper/{name})")
+        });
+    }
+    if tool == "run_command" || tool == "command" {
+        let command = input
+            .get("CommandLine")
+            .or_else(|| input.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let token = command_token(command)?;
+        if broad || command.contains(['(', ')']) {
+            return Some(format!("command({token})"));
+        }
+        return Some(format!("command({})", command.trim()));
+    }
+    if matches!(
+        tool,
+        "write_to_file" | "write_file" | "replace_file_content"
+    ) {
+        let path = input
+            .get("path")
+            .or_else(|| input.get("TargetFile"))
+            .or_else(|| input.get("file_path"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if path.is_empty() || path.contains(['(', ')', '\n']) {
+            return Some("write_file(*)".into());
+        }
+        return Some(if broad {
+            "write_file(*)".into()
+        } else {
+            format!("write_file({path})")
+        });
+    }
+    None
+}
+
+fn suggestion_parts(rule: &str) -> Value {
+    match rule.split_once('(') {
+        Some((tool, rest)) => {
+            let content = rest.strip_suffix(')').unwrap_or(rest);
+            json!({ "toolName": tool, "ruleContent": content })
+        }
+        None => json!({ "toolName": rule }),
+    }
+}
+
+/// A chat permission card for a tool Antigravity denied because it could not ask.
+pub fn agy_permission_request(
+    step_index: i64,
+    tool: &str,
+    input: &Value,
+    message: &str,
+) -> Option<Value> {
+    if !is_permission_denial(message) {
+        return None;
+    }
+    let specific = agy_allow_rule(tool, input, false)?;
+    let broad = agy_allow_rule(tool, input, true).filter(|rule| rule != &specific);
+    let label = tool.strip_prefix("mcp__paper__").unwrap_or(tool);
+    let mut request = json!({
+        "subtype": "can_use_tool",
+        "tool_name": label,
+        "tool_use_id": format!("tool-{step_index}"),
+        "input": input,
+        "allow_rule": specific,
+        "decision_reason": "Gemini needs permission for this. Allowing it saves the rule and retries.",
+    });
+    if let Some(rule) = broad {
+        request["permission_suggestions"] = json!([{
+            "behavior": "allow",
+            "destination": "userSettings",
+            "rules": [suggestion_parts(&rule)],
+        }]);
+    }
+    Some(json!({
+        "type": "control_request",
+        "request_id": format!("agy-perm-{step_index}"),
+        "request": request,
+    }))
 }
 
 fn toml_basic(value: &str) -> String {
@@ -959,13 +1118,20 @@ impl AgyDecoder {
             } else {
                 info.get("output").map(value_text).unwrap_or_default()
             };
-            return tool_pair(
-                &format!("tool-{}", index.unwrap_or(0)),
+            let step_index = index.unwrap_or(0);
+            let mut events = tool_pair(
+                &format!("tool-{step_index}"),
                 &name,
-                input,
+                input.clone(),
                 &output,
                 is_error,
             );
+            if is_error {
+                if let Some(card) = agy_permission_request(step_index, &name, &input, &output) {
+                    events.push(card);
+                }
+            }
+            return events;
         }
         vec![]
     }
@@ -1077,6 +1243,84 @@ mod tests {
         assert_eq!(result[0]["is_error"], true);
         assert_eq!(result[0]["result"], "sign in");
         assert_eq!(result[0]["duration_ms"], 1200);
+    }
+
+    #[test]
+    fn agy_asks_in_the_chat_instead_of_skipping_every_permission() {
+        let paper = agy_args(None, None, "paper").join(" ");
+        assert!(!paper.contains("dangerously-skip-permissions"), "{paper}");
+        assert!(!paper.contains("--mode"), "{paper}");
+        let edits = agy_args(Some("conv-1"), Some("gemini-3.8-flash-high"), "edits");
+        assert!(edits
+            .windows(2)
+            .any(|pair| pair[0] == "--mode" && pair[1] == "accept-edits"));
+        assert!(edits
+            .windows(2)
+            .any(|pair| pair[0] == "--conversation" && pair[1] == "conv-1"));
+        assert_eq!(
+            agy_allow_rule("run_command", &json!({"CommandLine": "echo hello"}), false).as_deref(),
+            Some("command(echo hello)")
+        );
+        assert_eq!(
+            agy_allow_rule("run_command", &json!({"CommandLine": "echo hello"}), true).as_deref(),
+            Some("command(echo)")
+        );
+        assert_eq!(
+            agy_allow_rule("mcp__paper__compile", &json!({}), true).as_deref(),
+            Some(PAPER_ALLOW_RULE)
+        );
+        let mut dec = AgyDecoder::default();
+        let denied = dec.push(&json!({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 2,
+                "state": "ERROR",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {
+                    "name": "run_command",
+                    "parameters": {"CommandLine": "echo hello"},
+                    "error": {"message": "permission check failed: user denied permission to run command:\necho hello"}
+                }
+            }
+        }));
+        let card = denied
+            .iter()
+            .find(|ev| ev["type"] == "control_request")
+            .unwrap();
+        assert_eq!(card["request"]["allow_rule"], "command(echo hello)");
+        assert_eq!(card["request"]["subtype"], "can_use_tool");
+        let failed = dec.push(&json!({
+            "event": "step_update",
+            "step_update": {
+                "step_index": 3,
+                "state": "ERROR",
+                "step_type": "tool",
+                "tool_name": "run_command",
+                "tool_info": {"error": {"message": "command exited 1"}}
+            }
+        }));
+        assert!(failed.iter().all(|ev| ev["type"] != "control_request"));
+    }
+
+    #[test]
+    fn grant_allow_rule_keeps_existing_settings() {
+        let path =
+            std::env::temp_dir().join(format!("lwp-agy-settings-{}.json", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"trustedWorkspaces":["/paper"],"permissions":{"allow":["command(git)"]}}"#,
+        )
+        .unwrap();
+        grant_allow_rule(&path, "command(echo)").unwrap();
+        grant_allow_rule(&path, "command(echo)").unwrap();
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["trustedWorkspaces"][0], "/paper");
+        let allow = value["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), 2);
+        assert_eq!(allow[0], "command(git)");
+        assert_eq!(allow[1], "command(echo)");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

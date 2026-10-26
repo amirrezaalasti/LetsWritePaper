@@ -693,9 +693,10 @@ async fn compile(state: State<'_, AppState>, main: Option<String>) -> CmdResult<
     .map_err(err)?
 }
 
-/// Export the compiled PDF next to the project (Typst compiles on demand).
+/// Compile the paper and write the PDF to `dest` (chosen in the save dialog).
 #[tauri::command(rename_all = "snake_case")]
-async fn export_pdf(state: State<'_, AppState>) -> CmdResult<String> {
+async fn export_pdf(state: State<'_, AppState>, dest: String) -> CmdResult<String> {
+    let dest = pdf_dest(&dest).ok_or("choose where to save the PDF")?;
     let (root, main, sources) = {
         let guard = state.session.lock().map_err(err)?;
         let s = guard.as_ref().ok_or("no project is open")?;
@@ -720,20 +721,50 @@ async fn export_pdf(state: State<'_, AppState>) -> CmdResult<String> {
                 pdf: true,
             },
         );
-        let src = out
-            .pdf_path
-            .ok_or_else(|| "compilation failed; see diagnostics".to_string())?;
-        let dest = root.join(
-            Path::new(&main)
-                .with_extension("pdf")
-                .file_name()
-                .unwrap_or_default(),
-        );
+        let src = out.pdf_path.clone().ok_or_else(|| compile_failure(&out))?;
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(err)?;
+            }
+        }
         std::fs::copy(&src, &dest).map_err(err)?;
         Ok(dest.display().to_string())
     })
     .await
     .map_err(err)?
+}
+
+fn pdf_dest(dest: &str) -> Option<std::path::PathBuf> {
+    let dest = dest.trim();
+    if dest.is_empty() {
+        return None;
+    }
+    let path = std::path::PathBuf::from(dest);
+    let pdf = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    Some(if pdf { path } else { path.with_extension("pdf") })
+}
+
+fn compile_failure(out: &paper_compile::CompileOutput) -> String {
+    let errors: Vec<String> = out
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == "error")
+        .take(3)
+        .map(|d| match (&d.file, d.line) {
+            (Some(file), Some(line)) => format!("{file}:{line}: {}", d.message),
+            (Some(file), None) => format!("{file}: {}", d.message),
+            (None, Some(line)) => format!("line {line}: {}", d.message),
+            (None, None) => d.message.clone(),
+        })
+        .collect();
+    if errors.is_empty() {
+        "compilation produced no PDF".into()
+    } else {
+        errors.join("\n")
+    }
 }
 
 // ---- sharing across devices -------------------------------------------------------
@@ -958,11 +989,12 @@ fn claude_send(
 
 #[tauri::command(rename_all = "snake_case")]
 fn claude_permission(
+    app: AppHandle,
     state: State<AppState>,
     chat_id: String,
     reply: claude::PermissionReply,
 ) -> CmdResult<()> {
-    state.claude.permission(&chat_id, &reply)
+    state.claude.permission(&app, &chat_id, &reply)
 }
 
 #[tauri::command(rename_all = "snake_case")]

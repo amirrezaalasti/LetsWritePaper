@@ -70,7 +70,7 @@ export function onHideSidebar(handler: () => void): () => void {
   };
 }
 
-export type ViewShortcut = "sidebar" | "right-pane" | "font-up" | "font-down" | "font-reset";
+export type ViewShortcut = "sidebar" | "right-pane" | "full-preview" | "font-up" | "font-down" | "font-reset";
 
 /** Shortcuts that use ⌘/Ctrl. Existing compile, assistant, and blame chords are left to the caller. */
 export function viewShortcut(e: KeyboardEvent): ViewShortcut | null {
@@ -78,6 +78,7 @@ export function viewShortcut(e: KeyboardEvent): ViewShortcut | null {
   if (!(e.metaKey || e.ctrlKey) || e.altKey) return null;
   const key = e.key.toLowerCase();
   if (!e.shiftKey && key === "b") return "sidebar";
+  if (e.shiftKey && e.code === "Backslash") return "full-preview";
   if (!e.shiftKey && (key === "\\" || e.code === "Backslash")) return "right-pane";
   if (e.code === "NumpadAdd" || key === "+" || key === "=" || e.code === "Equal") return "font-up";
   if (e.code === "NumpadSubtract" || key === "-" || key === "_" || e.code === "Minus") return "font-down";

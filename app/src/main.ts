@@ -1,4 +1,4 @@
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import { api, b64ToBytes, events, type EditorContext, type ProjectInfo, type Section } from "./api";
@@ -132,9 +132,27 @@ async function workbench(info: ProjectInfo) {
   const claudeEl = h("section", { class: "claude hidden" });
   const rightTab = (id: "preview" | "claude", label: string) =>
     h("button", { class: `rtab ${id === "preview" ? "active" : ""}`, "data-tab": id, onclick: () => showRight(id) }, label);
-  const rightTabs = h("div", { class: "rtabs", role: "tablist" }, rightTab("preview", "Preview"), rightTab("claude", "◆ Assistant"));
+  const assistantTab = rightTab("claude", "◆ Assistant");
+  const rightTabs = h("div", { class: "rtabs", role: "tablist" }, rightTab("preview", "Preview"), assistantTab);
   const rightPane = h("div", { class: "rightpane" }, rightTabs, previewEl, claudeEl);
-  const toggleRight = () => rightPane.classList.toggle("hidden");
+  const workbenchEl = h("div", { class: "workbench" });
+  let fullView = false;
+  let leaveFullView: () => boolean = () => false;
+  const toggleRight = () => {
+    if (leaveFullView()) return;
+    rightPane.classList.toggle("hidden");
+  };
+  const fullViewBtn = h(
+    "button",
+    {
+      class: "small tabbar-action",
+      title: "Open the compiled paper in full view (⌘/Ctrl+Shift+\\)",
+      "aria-label": "Open the compiled paper in full view",
+      "aria-keyshortcuts": "Control+Shift+\\ Meta+Shift+\\",
+      onclick: () => setFullView(true),
+    },
+    "Full view",
+  );
   let editorFont = loadEditorFont();
   applyEditorFont(editorFont);
   const fontSmaller = h("button", {
@@ -189,10 +207,11 @@ async function workbench(info: ProjectInfo) {
   const main = h(
     "main",
     { class: "main" },
-    h("div", { class: "tabbar" }, toggleSidebarBtn, h("span", { class: "tabbar-sep" }), tabs, h("span", { class: "spacer" }), claudeBtn, togglePreview),
+    h("div", { class: "tabbar" }, toggleSidebarBtn, h("span", { class: "tabbar-sep" }), tabs, h("span", { class: "spacer" }), fullViewBtn, claudeBtn, togglePreview),
     editorArea,
   );
-  clear(app, h("div", { class: "workbench" }, activity, sidebar, main, rightPane), statusbar);
+  clear(workbenchEl, activity, sidebar, main, rightPane);
+  clear(app, workbenchEl, statusbar);
 
   const editors = new Editors(tabs, editorArea, info.me);
   const setFont = (size: number) => {
@@ -205,6 +224,42 @@ async function workbench(info: ProjectInfo) {
     editors.remeasure();
   };
   const preview = new Preview(previewEl);
+  const setFullView = (on: boolean) => {
+    fullView = on;
+    workbenchEl.classList.toggle("full-preview", on);
+    preview.setFullView(on);
+    fullViewBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    if (!on) return;
+    showRight("preview");
+    void preview.compile();
+  };
+  leaveFullView = () => {
+    if (!fullView) return false;
+    setFullView(false);
+    return true;
+  };
+  preview.onFullView = () => setFullView(!fullView);
+  preview.onDownload = () => void downloadPdf();
+  const downloadPdf = async () => {
+    const stem = info.main.split(/[/\\]/).pop()?.replace(/\.(typ|tex)$/i, "") || "paper";
+    const base = (info.title || stem).replace(/[\\/:*?"<>|]/g, "").trim() || stem;
+    const dest = await saveDialog({
+      title: "Download PDF",
+      defaultPath: base.toLowerCase().endsWith(".pdf") ? base : `${base}.pdf`,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
+    });
+    if (typeof dest !== "string") return;
+    preview.setDownloading(true);
+    try {
+      await editors.flushAll();
+      const path = await api.exportPdf(dest);
+      toast(`Saved ${path}`);
+    } catch (e) {
+      toast(String(e), "error");
+    } finally {
+      preview.setDownloading(false);
+    }
+  };
   let outlineCache: { path: string; sections: Section[] } | null = null;
   let cursorLine = 1;
   const editorContext = (): EditorContext => {
@@ -214,7 +269,10 @@ async function workbench(info: ProjectInfo) {
     const selection = editors.selectionText();
     return { path, line: path ? cursorLine : undefined, section: section?.title, selection: selection || undefined };
   };
-  const claude = new ClaudePanel(claudeEl, editorContext, info.title, () => editors.listDocs());
+  const claude = new ClaudePanel(claudeEl, editorContext, info.title, () => editors.listDocs(), (busy) => {
+    assistantTab.classList.toggle("working", busy);
+    assistantTab.title = busy ? "The assistant is still working. Switching tabs leaves it running." : "";
+  });
   const showRight = (id: "preview" | "claude") => {
     rightPane.classList.remove("hidden");
     previewEl.classList.toggle("hidden", id !== "preview");
@@ -365,6 +423,11 @@ async function workbench(info: ProjectInfo) {
   const onKey = (e: KeyboardEvent) => {
     if (e.isComposing || e.key === "Process") return;
     if (document.querySelector(".overlay")) return;
+    if (e.key === "Escape" && fullView && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      setFullView(false);
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === "s") {
       e.preventDefault();
       void compileNow();
@@ -390,6 +453,9 @@ async function workbench(info: ProjectInfo) {
         break;
       case "right-pane":
         toggleRight();
+        break;
+      case "full-preview":
+        setFullView(!fullView);
         break;
       case "font-up":
         setFont(editorFont + EDITOR_FONT_STEP);
@@ -421,7 +487,8 @@ async function workbench(info: ProjectInfo) {
     const dir = steps > 0 ? -1 : 1;
     const count = Math.min(Math.abs(steps), 3);
     const overPreview =
-      !previewEl.classList.contains("hidden") && !rightPane.classList.contains("hidden") && e.target instanceof Node && previewEl.contains(e.target);
+      fullView ||
+      (!previewEl.classList.contains("hidden") && !rightPane.classList.contains("hidden") && e.target instanceof Node && previewEl.contains(e.target));
     if (overPreview) preview.nudgeZoom(dir * 0.1 * count);
     else setFont(editorFont + dir * count);
   };
