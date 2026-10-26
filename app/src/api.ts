@@ -185,6 +185,8 @@ export interface SyncStatus {
   last_pull_at: number | null;
   pushed: number;
   pulled: number;
+  /** Other people connected to the shared paper right now. */
+  peers: { client: string; name: string }[];
 }
 
 export interface ShareInfo {

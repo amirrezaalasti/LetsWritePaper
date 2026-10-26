@@ -297,7 +297,9 @@ async function workbench(info: ProjectInfo) {
     const share = await api.shareInfo().catch(() => null);
     if (share?.shared) {
       const st = share.status;
-      status.sync.textContent = st?.connected ? "⇄ synced across devices" : "⇄ sync offline";
+      const peers = st?.peers ?? [];
+      const here = peers.length ? ` · with ${peers.map((p) => p.name || "someone").join(", ")}` : "";
+      status.sync.textContent = st?.connected ? `⇄ synced${here}` : "⇄ sync offline";
       status.sync.title = st?.last_error ?? share.link ?? "";
       return;
     }

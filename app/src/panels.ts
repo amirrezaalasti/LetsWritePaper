@@ -795,6 +795,7 @@ async function sharePanel(el: HTMLElement, ctx: PanelContext) {
       "Shared",
       h("p", {}, h("span", { class: `dot ${s?.connected ? "ok" : "bad"}` }), ` Sync ${state}`),
       s ? h("p", { class: "muted small-text" }, `Sent ${s.pushed} · received ${s.pulled} changes${s.last_pull_at ? ` · last update ${timeAgo(s.last_pull_at)}` : ""}`) : null,
+      s ? h("p", {}, s.peers?.length ? `Here now: ${s.peers.map((p) => p.name || "someone").join(", ")}` : "Nobody else is connected right now.") : null,
       info.link ? h("div", { class: "code-row" }, h("code", {}, info.link), copy(info.link)) : null,
       h("p", { class: "muted small-text" }, "On the other device: open LetsWritePaper → “Join a shared paper…” and paste the link, or run `paper join '<link>'`. Anyone with the link can edit, so share it like a password."),
       info.hosted_here ? h("p", { class: "muted small-text" }, "This computer hosts the relay: keep the app open while others work.") : null,

@@ -19,6 +19,8 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 const MAX_BODY: u64 = 256 * 1024 * 1024;
 const MAX_WAIT_SECS: u64 = 30;
+/// A device counts as present this long after its last heartbeat.
+pub const PRESENCE_TTL_SECS: u64 = 45;
 pub const PULL_BATCH: usize = 500;
 
 #[derive(Serialize, Deserialize)]
@@ -43,12 +45,33 @@ pub struct PushResponse {
     pub changed: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct PresenceRequest {
+    pub client: String,
+    /// Display name of the person on that device.
+    pub name: String,
+}
+
+/// A device currently connected to a shared paper.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Peer {
+    pub client: String,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PresenceResponse {
+    pub peers: Vec<Peer>,
+}
+
 struct Project {
     store: Mutex<Store>,
     token: String,
     /// Bumped on every accepted push; long-polling pulls wait on it.
     version: Mutex<u64>,
     changed: Condvar,
+    /// client -> (name, last heartbeat). In memory only: presence is live state.
+    presence: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 pub struct Relay {
@@ -100,7 +123,7 @@ impl Relay {
         let dir = self.data.join(id);
         let Ok(token) = std::fs::read_to_string(dir.join("token")) else { return Ok(None) };
         let store = Store::open(&dir.join("history.db"))?;
-        let p = Arc::new(Project { store: Mutex::new(store), token: token.trim().to_string(), version: Mutex::new(0), changed: Condvar::new() });
+        let p = Arc::new(Project { store: Mutex::new(store), token: token.trim().to_string(), version: Mutex::new(0), changed: Condvar::new(), presence: Mutex::new(HashMap::new()) });
         map.insert(id.to_string(), p.clone());
         Ok(Some(p))
     }
@@ -181,6 +204,19 @@ impl Relay {
                             project.changed.notify_all();
                         }
                         Ok(json_response(200, serde_json::to_value(PushResponse { changed })?))
+                    }
+                    (Method::Post, "presence") => {
+                        let body: PresenceRequest = read_json(req)?;
+                        let mut presence = project.presence.lock().unwrap();
+                        let name: String = body.name.trim().chars().take(80).collect();
+                        presence.insert(body.client.chars().take(64).collect(), (name, Instant::now()));
+                        presence.retain(|_, (_, seen)| seen.elapsed() < Duration::from_secs(PRESENCE_TTL_SECS));
+                        let mut peers: Vec<Peer> = presence
+                            .iter()
+                            .map(|(client, (name, _))| Peer { client: client.clone(), name: name.clone() })
+                            .collect();
+                        peers.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.client.cmp(&b.client)));
+                        Ok(json_response(200, serde_json::to_value(PresenceResponse { peers })?))
                     }
                     (Method::Get, "pull") => {
                         let after: i64 = params.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);

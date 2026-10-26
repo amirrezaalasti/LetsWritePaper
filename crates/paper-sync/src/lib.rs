@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 pub use client::{join, lan_ip, parse_link, share, start, HostedRelay, RemoteConfig, SyncHandle, SyncStatus};
-pub use server::Relay;
+pub use server::{Peer, Relay};
 
 pub const DEFAULT_PORT: u16 = 8787;
 
@@ -99,8 +99,13 @@ mod tests {
         }));
         assert!(wait_for(|| std::fs::read_to_string(b.project.root.join("paper.toml")).unwrap().contains("paper-methods")));
         assert!(ha.snapshot().connected && hb.snapshot().connected);
+        // Each device sees the other one, not itself.
+        assert!(wait_for(|| ha.snapshot().peers.len() == 1 && hb.snapshot().peers.len() == 1));
         // Disk mirrors on both sides.
         assert!(std::fs::read_to_string(a.project.root.join("main.typ")).unwrap().contains("From tablet."));
+
+        // Joining into a folder inside a paper project would sync it into itself.
+        assert!(join(&link, &a.project.root.join("copy")).is_err());
 
         // A bad token is rejected.
         let bad = format!("{server}/p/{}#nope", cfg.project);

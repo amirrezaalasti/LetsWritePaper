@@ -13,13 +13,14 @@ use paper_core::sync::{apply_files, capture_files, ChangeBatch};
 use paper_core::now_ms;
 use serde::{Deserialize, Serialize};
 
-use crate::server::{CreateRequest, CreateResponse, PushRequest, PushResponse};
+use crate::server::{CreateRequest, CreateResponse, Peer, PresenceRequest, PresenceResponse, PushRequest, PushResponse};
 
 /// Records that arrived from the relay carry this origin, so they are never pushed back.
 pub const RELAY_ORIGIN: &str = "relay";
 const REMOTE_FILE: &str = "remote.json";
 const PUSH_BATCH: usize = 300;
 const PULL_WAIT_SECS: u64 = 25;
+const PRESENCE_EVERY_SECS: u64 = 10;
 
 /// Saved in `.paper/remote.json` (never synced or committed: it holds the token).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -180,6 +181,18 @@ impl Client {
             wait = 0;
         }
     }
+
+    /// Tell the relay this device is here; returns everyone connected.
+    fn presence(&self, name: &str) -> Result<Vec<Peer>> {
+        let body = PresenceRequest { client: self.cfg.client.clone(), name: name.to_string() };
+        let resp = self
+            .http
+            .post(&self.endpoint("presence"))
+            .header("Authorization", &format!("Bearer {}", self.cfg.token))
+            .send_json(&body)?;
+        let out: PresenceResponse = check(resp)?.body_mut().with_config().limit(1 << 20).read_json()?;
+        Ok(out.peers)
+    }
 }
 
 /// Create a shared copy of `project` on the relay at `server` and upload it.
@@ -220,6 +233,13 @@ pub fn join(link: &str, dir: &Path) -> Result<Project> {
     if dir.join(paper_core::project::MANIFEST).exists() {
         bail!("{} already contains a paper project", dir.display());
     }
+    if let Some(outer) = dir.parent().and_then(|p| Project::discover(p).ok()) {
+        bail!(
+            "{} is inside the paper project at {}; choose a folder outside it",
+            dir.display(),
+            outer.root.display()
+        );
+    }
     let state = dir.join(paper_core::project::STATE_DIR);
     std::fs::create_dir_all(&state)?;
     let cfg = RemoteConfig { url, project: project_id, token, client: uuid::Uuid::new_v4().simple().to_string(), hosted: None };
@@ -245,6 +265,10 @@ pub struct SyncStatus {
     pub last_pull_at: Option<i64>,
     pub pushed: usize,
     pub pulled: usize,
+    /// Other people connected to the paper right now (empty on relays
+    /// without presence support).
+    #[serde(default)]
+    pub peers: Vec<Peer>,
 }
 
 pub struct SyncHandle {
@@ -320,7 +344,7 @@ pub fn start(root: &Path) -> Result<Option<SyncHandle>> {
 
     // Pull loop.
     {
-        let (stop, status, root) = (stop.clone(), status.clone(), root.to_path_buf());
+        let (stop, status, root, cfg) = (stop.clone(), status.clone(), root.to_path_buf(), cfg.clone());
         std::thread::spawn(move || {
             let client = Client::new(cfg);
             let Ok(store) = Store::open(&project.db_path()) else { return };
@@ -345,6 +369,25 @@ pub fn start(root: &Path) -> Result<Option<SyncHandle>> {
                         std::thread::sleep(Duration::from_secs(backoff));
                         backoff = (backoff * 2).min(30);
                     }
+                }
+            }
+        });
+    }
+    // Presence heartbeat. Failures only clear the list: sync status comes from push/pull.
+    {
+        let (stop, status) = (stop.clone(), status.clone());
+        let client = Client::new(cfg.clone());
+        let name = paper_core::Author::local_user().name;
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                let peers = client.presence(&name).unwrap_or_default();
+                let others: Vec<Peer> = peers.into_iter().filter(|p| p.client != client.cfg.client).collect();
+                set(&status, &|s| s.peers = others.clone());
+                for _ in 0..PRESENCE_EVERY_SECS * 2 {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
                 }
             }
         });

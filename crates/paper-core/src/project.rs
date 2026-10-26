@@ -239,6 +239,21 @@ impl Project {
             && !rel
                 .split('/')
                 .any(|seg| IGNORED_DIRS.contains(&seg) || seg.starts_with('.'))
+            && !self.in_nested_project(rel)
+    }
+
+    /// True when `rel` lies inside another paper project nested in this one
+    /// (a subfolder with its own `paper.toml`, e.g. a shared copy joined into
+    /// it). Its files belong to that project; tracking them here would sync
+    /// them back into the nested copy one level deeper, forever.
+    pub fn in_nested_project(&self, rel: &str) -> bool {
+        let mut dir = self.root.clone();
+        let mut segs: Vec<&str> = rel.split('/').collect();
+        segs.pop();
+        segs.into_iter().any(|seg| {
+            dir.push(seg);
+            dir.join(MANIFEST).is_file()
+        })
     }
 
     /// Relative paths of all trackable files currently on disk.
@@ -253,7 +268,10 @@ impl Project {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 if path.is_dir() {
-                    if !IGNORED_DIRS.contains(&name.as_str()) && !name.starts_with('.') {
+                    if !IGNORED_DIRS.contains(&name.as_str())
+                        && !name.starts_with('.')
+                        && !path.join(MANIFEST).is_file()
+                    {
                         stack.push(path);
                     }
                 } else if let Some(rel) = self.relative(&path) {
@@ -381,6 +399,22 @@ mod tests {
         assert_eq!(p2.manifest.paper.title, "My Paper");
         assert_eq!(p2.manifest.skills.global[1], "typst-writing");
         assert!(p.scan_files().contains(&"main.typ".to_string()));
+    }
+
+    #[test]
+    fn skips_nested_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Project::init(dir.path(), "Outer", Format::Latex).unwrap();
+        Project::init(&dir.path().join("copy"), "Inner", Format::Latex).unwrap();
+        std::fs::create_dir_all(dir.path().join("sec")).unwrap();
+        std::fs::write(dir.path().join("sec/intro.tex"), "x").unwrap();
+        assert_eq!(
+            p.scan_files(),
+            vec!["main.tex", "refs.bib", "sec/intro.tex"]
+        );
+        assert!(!p.is_tracked_path("copy/main.tex"));
+        assert!(!p.is_tracked_path("copy/copy/main.tex"));
+        assert!(p.is_tracked_path("sec/intro.tex"));
     }
 
     #[test]

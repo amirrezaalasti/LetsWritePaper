@@ -507,7 +507,7 @@ impl Workspace {
 
     /// Owner only: mirror a document to its file.
     fn materialize(&mut self, path: &str) -> Result<()> {
-        if !self.is_owner() {
+        if !self.is_owner() || self.project.in_nested_project(path) {
             return Ok(());
         }
         let doc = self.doc(path)?;
@@ -566,6 +566,7 @@ impl Workspace {
     /// Owner start-up: adopt edits made while nobody was watching, import new
     /// files, and restore files missing from disk.
     fn reconcile_disk(&mut self) -> Result<()> {
+        self.drop_nested_documents()?;
         for path in self.project.scan_files() {
             if !self.docs.contains_key(&path) {
                 if let Ok(text) = std::fs::read_to_string(self.project.resolve(&path)?) {
@@ -616,6 +617,25 @@ impl Workspace {
                 },
                 _ => self.materialize(&path)?,
             }
+        }
+        Ok(())
+    }
+
+    /// Forget documents that live inside a nested paper project (left by
+    /// copies that synced each other's files back and forth). Unlike
+    /// `delete_document`, the files stay: they belong to the nested project.
+    fn drop_nested_documents(&mut self) -> Result<()> {
+        let nested: Vec<String> = self
+            .documents()
+            .into_iter()
+            .filter(|p| self.project.in_nested_project(p))
+            .collect();
+        for path in nested {
+            self.store.remove_document(&path)?;
+            self.docs.remove(&path);
+            self.materialized.remove(&path);
+            self.write_mirror_entry(&path, None);
+            self.events.push(WorkspaceEvent::DocRemoved { path });
         }
         Ok(())
     }
@@ -1366,6 +1386,25 @@ mod tests {
         let project = Project::init(dir.path(), "Test Paper", Format::Latex).unwrap();
         let ws = Workspace::open(project, Ownership::Auto).unwrap();
         (dir, ws)
+    }
+
+    #[test]
+    fn forgets_documents_inside_a_nested_project() {
+        let (dir, mut ws) = setup();
+        let me = Author::human("ada");
+        ws.create_document("copy/main.tex", "inner", &me, None)
+            .unwrap();
+        ws.create_document("copy/copy/main.tex", "ghost", &me, None)
+            .unwrap();
+        drop(ws);
+        Project::init(&dir.path().join("copy"), "Test Paper", Format::Latex).unwrap();
+        let ws = Workspace::open(Project::open(dir.path()).unwrap(), Ownership::Auto).unwrap();
+        assert!(ws.documents().iter().all(|p| !p.starts_with("copy/")));
+        // The files belong to the nested project and stay.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("copy/main.tex")).unwrap(),
+            "inner"
+        );
     }
 
     #[test]
