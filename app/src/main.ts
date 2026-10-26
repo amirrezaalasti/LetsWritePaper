@@ -6,7 +6,11 @@ import { ClaudePanel } from "./claude";
 import { Editors } from "./editor";
 import { PANELS, renderPanel, type PanelId } from "./panels";
 import { Preview } from "./preview";
+import { initTheme, themePicker } from "./themes";
+import { setupWizard } from "./setup";
 import { authorBadge, clear, form, guard, h, toast } from "./ui";
+
+initTheme();
 
 const app = document.getElementById("app")!;
 let unlisten: UnlistenFn[] = [];
@@ -69,9 +73,11 @@ function welcome() {
         h("button", { class: "big", onclick: () => openExisting() }, "Open paper…"),
         h("button", { class: "big", onclick: joinShared }, "Join a shared paper…"),
       ),
+      h("button", { class: "link", onclick: () => void setupWizard(welcome) }, "Set up this computer…"),
       recent.length
         ? h("div", { class: "recent" }, h("h4", {}, "Recent"), ...recent.map((r) => h("button", { class: "link", onclick: () => openExisting(r) }, r)))
         : null,
+      themePicker(true),
     ),
   );
 }
@@ -94,7 +100,7 @@ async function workbench(info: ProjectInfo) {
   const claudeEl = h("section", { class: "claude hidden" });
   const rightTab = (id: "preview" | "claude", label: string) =>
     h("button", { class: `rtab ${id === "preview" ? "active" : ""}`, "data-tab": id, onclick: () => showRight(id) }, label);
-  const rightTabs = h("div", { class: "rtabs", role: "tablist" }, rightTab("preview", "Preview"), rightTab("claude", "◆ Claude"));
+  const rightTabs = h("div", { class: "rtabs", role: "tablist" }, rightTab("preview", "Preview"), rightTab("claude", "◆ Assistant"));
   const rightPane = h("div", { class: "rightpane" }, rightTabs, previewEl, claudeEl);
   const status = {
     sync: h("span", {}),
@@ -111,9 +117,10 @@ async function workbench(info: ProjectInfo) {
     status.words,
     status.cursor,
     status.compile,
+    themePicker(),
   );
   const togglePreview = h("button", { class: "icon", title: "Toggle side pane", onclick: () => rightPane.classList.toggle("hidden") }, "◧");
-  const claudeBtn = h("button", { class: "icon", title: "Ask Claude (⌘/Ctrl+L)", onclick: () => showRight("claude") }, "◆");
+  const claudeBtn = h("button", { class: "icon", title: "Ask an assistant (⌘/Ctrl+L)", onclick: () => showRight("claude") }, "◆");
   const main = h("main", { class: "main" }, h("div", { class: "tabbar" }, tabs, h("span", { class: "spacer" }), claudeBtn, togglePreview), editorArea);
   clear(app, h("div", { class: "workbench" }, activity, sidebar, main, rightPane), statusbar);
 
@@ -153,6 +160,7 @@ async function workbench(info: ProjectInfo) {
       await guard(editors.open(path, line));
     },
   };
+  editors.listDocs = () => ctx.info.documents;
 
   const renderActivity = () =>
     clear(
@@ -213,6 +221,15 @@ async function workbench(info: ProjectInfo) {
     status.words.textContent = text === null ? "" : `${text.split(/\s+/).filter(Boolean).length} words`;
   };
   let outlineTimer: number | undefined;
+  let historyTimer: number | undefined;
+  const refreshHistory = () => {
+    if (panel !== "history") return;
+    window.clearTimeout(historyTimer);
+    historyTimer = window.setTimeout(async () => {
+      await editors.flushAll();
+      if (panel === "history") refresh();
+    }, 700);
+  };
   editors.onChange = (path) => {
     updateWords(path);
     if (isTypst) preview.schedule(700);
@@ -221,6 +238,7 @@ async function workbench(info: ProjectInfo) {
       void refreshOutlineCache(path);
       if (panel === "outline") refresh();
     }, 1200);
+    refreshHistory();
   };
   editors.onCursor = (_path, line) => {
     cursorLine = line;
@@ -250,6 +268,7 @@ async function workbench(info: ProjectInfo) {
         window.clearTimeout(blameTimers.get(path));
         blameTimers.set(path, window.setTimeout(() => void editors.refreshBlame(path), 800));
       }
+      refreshHistory();
     }),
     await events.onDocAdded(() => {
       void api.projectInfo().then((i) => (ctx.info.documents = i.documents));
@@ -292,8 +311,16 @@ async function workbench(info: ProjectInfo) {
   void compileNow();
 }
 
-// Opened with a project path (e.g. `letswritepaper ~/papers/foo`)?
-api
-  .projectInfo()
-  .then(workbench)
-  .catch(() => welcome());
+function openOrWelcome() {
+  void api.projectInfo().then(workbench).catch(() => welcome());
+}
+
+// First launch runs the setup wizard. A project path on the command line
+// (`letswritepaper ~/papers/foo`) still opens once setup finishes.
+void api
+  .setupStatus()
+  .then((status) => {
+    if (!status.setup_done) void setupWizard(openOrWelcome);
+    else openOrWelcome();
+  })
+  .catch(() => openOrWelcome());

@@ -11,10 +11,23 @@ pub const STATE_DIR: &str = ".paper";
 /// File extensions tracked as live, versioned documents.
 pub const DEFAULT_TRACKED: &[&str] = &["tex", "typ", "bib", "md", "sty", "cls"];
 /// Files that are about the project rather than part of the paper.
-pub const IGNORED_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md", "README.md", "CHANGELOG.md", "LICENSE.md"];
+pub const IGNORED_FILES: &[&str] = &[
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE.md",
+];
 /// Directories never scanned for documents.
 pub const IGNORED_DIRS: &[&str] = &[
-    ".paper", ".git", "target", "node_modules", "build", "out", "_minted", ".venv",
+    ".paper",
+    ".git",
+    "target",
+    "node_modules",
+    "build",
+    "out",
+    "_minted",
+    ".venv",
 ];
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,7 +95,10 @@ pub struct TrackConfig {
 
 impl Default for TrackConfig {
     fn default() -> Self {
-        TrackConfig { extensions: default_tracked(), ignore: vec![] }
+        TrackConfig {
+            extensions: default_tracked(),
+            ignore: vec![],
+        }
     }
 }
 
@@ -113,7 +129,8 @@ impl Project {
     pub fn open(root: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(root.join(MANIFEST))
             .map_err(|_| Error::NoProject(root.to_path_buf()))?;
-        let manifest: Manifest = toml::from_str(&text).map_err(|e| Error::Manifest(e.to_string()))?;
+        let manifest: Manifest =
+            toml::from_str(&text).map_err(|e| Error::Manifest(e.to_string()))?;
         let root = root.canonicalize()?;
         std::fs::create_dir_all(root.join(STATE_DIR))?;
         Ok(Project { root, manifest })
@@ -153,7 +170,10 @@ impl Project {
             },
             track: TrackConfig::default(),
         };
-        let project = Project { root: root.to_path_buf(), manifest };
+        let project = Project {
+            root: root.to_path_buf(),
+            manifest,
+        };
         project.save_manifest()?;
         std::fs::create_dir_all(root.join(STATE_DIR).join("skills"))?;
 
@@ -177,7 +197,8 @@ impl Project {
     }
 
     pub fn save_manifest(&self) -> Result<()> {
-        let text = toml::to_string_pretty(&self.manifest).map_err(|e| Error::Manifest(e.to_string()))?;
+        let text =
+            toml::to_string_pretty(&self.manifest).map_err(|e| Error::Manifest(e.to_string()))?;
         std::fs::write(self.root.join(MANIFEST), text)?;
         Ok(())
     }
@@ -201,7 +222,10 @@ impl Project {
     }
 
     pub fn is_tracked_path(&self, rel: &str) -> bool {
-        let ext = Path::new(rel).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
         if !self.manifest.track.extensions.iter().any(|e| e == ext) {
             return false;
         }
@@ -212,7 +236,9 @@ impl Project {
         });
         !ignored_by_config
             && !IGNORED_FILES.contains(&rel)
-            && !rel.split('/').any(|seg| IGNORED_DIRS.contains(&seg) || seg.starts_with('.'))
+            && !rel
+                .split('/')
+                .any(|seg| IGNORED_DIRS.contains(&seg) || seg.starts_with('.'))
     }
 
     /// Relative paths of all trackable files currently on disk.
@@ -220,7 +246,9 @@ impl Project {
         let mut out = vec![];
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -242,7 +270,10 @@ impl Project {
     /// Project-relative, `/`-separated form of an absolute path inside the project.
     pub fn relative(&self, abs: &Path) -> Option<String> {
         let rel = abs.strip_prefix(&self.root).ok()?;
-        let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
+        let parts: Vec<_> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect();
         Some(parts.join("/"))
     }
 }

@@ -21,6 +21,7 @@ import { stex } from "@codemirror/legacy-modes/mode/stex";
 import { tags as t } from "@lezer/highlight";
 
 import { api, b64ToBytes, bytesToB64, type Author, type BlameLine, type ReviewComment } from "./api";
+import { bibSupport, latexSupport } from "./latex-complete";
 import { REMOTE_ORIGIN, LOCAL_ORIGIN, UpdateBatcher, yTextBinding } from "./ybinding";
 import { h, clear } from "./ui";
 
@@ -68,10 +69,12 @@ const bibParser: StreamParser<null> = {
   },
 };
 
-function languageFor(path: string): Extension {
-  if (path.endsWith(".tex") || path.endsWith(".sty") || path.endsWith(".cls")) return StreamLanguage.define(stex);
+function languageFor(path: string, host: { listDocs: () => readonly string[]; readDoc: (path: string) => Promise<string> }): Extension {
+  if (path.endsWith(".tex") || path.endsWith(".sty") || path.endsWith(".cls")) {
+    return [StreamLanguage.define(stex), latexSupport(path, host)];
+  }
   if (path.endsWith(".typ")) return StreamLanguage.define(typstParser);
-  if (path.endsWith(".bib")) return StreamLanguage.define(bibParser);
+  if (path.endsWith(".bib")) return [StreamLanguage.define(bibParser), bibSupport()];
   return [];
 }
 
@@ -178,6 +181,8 @@ export class Editors {
   onChange: (path: string) => void = () => {};
   onActivate: (path: string | null) => void = () => {};
   onCursor: (path: string, line: number) => void = () => {};
+  /** Project documents, used to complete \\cite, \\ref, and \\input. */
+  listDocs: () => readonly string[] = () => [];
 
   constructor(
     private tabs: HTMLElement,
@@ -202,6 +207,7 @@ export class Editors {
         state: EditorState.create({
           doc: ytext.toString(),
           extensions: [
+            EditorState.allowMultipleSelections.of(true),
             lineNumbers(),
             blame.of([]),
             highlightActiveLineGutter(),
@@ -211,7 +217,7 @@ export class Editors {
             highlightSelectionMatches(),
             bracketMatching(),
             EditorView.lineWrapping,
-            languageFor(path),
+            languageFor(path, this),
             syntaxHighlighting(paperHighlight),
             reviewField,
             keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap, ...searchKeymap]),
@@ -313,6 +319,12 @@ export class Editors {
 
   text(path: string): string | null {
     return this.docs.get(path)?.view.state.doc.toString() ?? null;
+  }
+
+  readDoc(path: string): Promise<string> {
+    const open = this.text(path);
+    if (open != null) return Promise.resolve(open);
+    return api.docText(path).catch(() => "");
   }
 
   async flushAll() {

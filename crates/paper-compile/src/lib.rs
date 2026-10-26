@@ -2,7 +2,9 @@
 //!
 //! Typst compiles in-process from in-memory sources (the live CRDT text), so
 //! the preview never waits for a disk round-trip. LaTeX runs `tectonic` when
-//! installed, otherwise `latexmk`, on the files the owner process mirrors to disk.
+//! it is installed (including the copy the setup wizard places in the app's
+//! bin directory), otherwise `latexmk`, on the files the owner process mirrors
+//! to disk.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -63,7 +65,13 @@ impl Compiler {
 
     /// Compile `main` (project-relative). `sources` overrides file contents
     /// with live text (relative path → text); other files come from disk.
-    pub fn compile(&mut self, root: &Path, main: &str, sources: &HashMap<String, String>, opts: CompileOptions) -> CompileOutput {
+    pub fn compile(
+        &mut self,
+        root: &Path,
+        main: &str,
+        sources: &HashMap<String, String>,
+        opts: CompileOptions,
+    ) -> CompileOutput {
         let start = Instant::now();
         let mut out = if main.ends_with(".typ") {
             self.compile_typst(root, main, sources, opts)
@@ -75,11 +83,24 @@ impl Compiler {
     }
 
     #[cfg(feature = "typst")]
-    fn compile_typst(&mut self, root: &Path, main: &str, sources: &HashMap<String, String>, opts: CompileOptions) -> CompileOutput {
-        let engine = self.typst.get_or_insert_with(typst_engine::TypstEngine::new);
+    fn compile_typst(
+        &mut self,
+        root: &Path,
+        main: &str,
+        sources: &HashMap<String, String>,
+        opts: CompileOptions,
+    ) -> CompileOutput {
+        let engine = self
+            .typst
+            .get_or_insert_with(typst_engine::TypstEngine::new);
         let mut out = engine.compile(root, main, sources, opts);
         if let (Some(pdf), true) = (&out.pdf, opts.pdf) {
-            let path = build_dir(root).join(Path::new(main).with_extension("pdf").file_name().unwrap_or_default());
+            let path = build_dir(root).join(
+                Path::new(main)
+                    .with_extension("pdf")
+                    .file_name()
+                    .unwrap_or_default(),
+            );
             if std::fs::write(&path, pdf).is_ok() {
                 out.pdf_path = Some(path);
             }
@@ -88,10 +109,44 @@ impl Compiler {
     }
 
     #[cfg(not(feature = "typst"))]
-    fn compile_typst(&mut self, root: &Path, main: &str, _: &HashMap<String, String>, _: CompileOptions) -> CompileOutput {
+    fn compile_typst(
+        &mut self,
+        root: &Path,
+        main: &str,
+        _: &HashMap<String, String>,
+        _: CompileOptions,
+    ) -> CompileOutput {
         // Fall back to the typst CLI when built without the embedded compiler.
-        let out_pdf = build_dir(root).join(Path::new(main).with_extension("pdf").file_name().unwrap_or_default());
-        run_tool(root, "typst", &["compile".as_ref(), main.as_ref(), out_pdf.as_os_str()], out_pdf, parse_typst_cli)
+        let out_pdf = build_dir(root).join(
+            Path::new(main)
+                .with_extension("pdf")
+                .file_name()
+                .unwrap_or_default(),
+        );
+        let Some(tool) = find_tool("typst") else {
+            return CompileOutput {
+                ok: false,
+                engine: "none".into(),
+                diagnostics: vec![Diagnostic {
+                    severity: "error".into(),
+                    file: None,
+                    line: None,
+                    message:
+                        "This build does not include Typst, and the typst program is not installed."
+                            .into(),
+                    hints: vec![],
+                }],
+                ..Default::default()
+            };
+        };
+        run_tool(
+            root,
+            &tool,
+            "typst",
+            &["compile".as_ref(), main.as_ref(), out_pdf.as_os_str()],
+            out_pdf,
+            parse_typst_cli,
+        )
     }
 }
 
@@ -101,15 +156,105 @@ fn build_dir(root: &Path) -> PathBuf {
     dir
 }
 
-fn has_tool(name: &str) -> bool {
-    Command::new(name).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+/// The desktop app embeds Typst. Builds without that feature fall back to the CLI.
+pub fn typst_embedded() -> bool {
+    cfg!(feature = "typst")
+}
+
+fn exe_names(name: &str) -> Vec<String> {
+    if cfg!(windows) {
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.bat"),
+            name.to_string(),
+        ]
+    } else {
+        vec![name.to_string()]
+    }
+}
+
+/// Directories searched for `tectonic`, `latexmk`, and `typst`.
+/// The setup wizard's bin directory comes first, then the user and system paths.
+fn tool_search_dirs(
+    app_bin: PathBuf,
+    home: Option<PathBuf>,
+    path: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![app_bin];
+    if let Some(home) = home {
+        dirs.push(home.join(".local").join("bin"));
+    }
+    if cfg!(target_os = "macos") {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    for dir in path {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+fn path_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs.extend(registry_path_dirs().iter().cloned());
+    dirs
+}
+
+fn registry_path_dirs() -> &'static [PathBuf] {
+    static DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(windows_registry_paths)
+}
+
+#[cfg(windows)]
+fn windows_registry_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for scope in ["User", "Machine"] {
+        let script = format!("[Environment]::GetEnvironmentVariable('Path','{scope}')");
+        let Ok(output) = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        out.extend(std::env::split_paths(text.trim()));
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn windows_registry_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Full path of an installed program, if one is visible to this process.
+pub fn find_tool(name: &str) -> Option<PathBuf> {
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
+    for dir in tool_search_dirs(paper_core::user_config::bin_dir(), home, path_dirs()) {
+        for file in exe_names(name) {
+            let candidate = dir.join(&file);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Which LaTeX engine would be used, if any.
 pub fn latex_engine() -> Option<&'static str> {
-    if has_tool("tectonic") {
+    if find_tool("tectonic").is_some() {
         Some("tectonic")
-    } else if has_tool("latexmk") {
+    } else if find_tool("latexmk").is_some() {
         Some("latexmk")
     } else {
         None
@@ -118,50 +263,75 @@ pub fn latex_engine() -> Option<&'static str> {
 
 fn compile_latex(root: &Path, main: &str) -> CompileOutput {
     let out_dir = build_dir(root);
-    let pdf = out_dir.join(Path::new(main).with_extension("pdf").file_name().unwrap_or_default());
+    let pdf = out_dir.join(
+        Path::new(main)
+            .with_extension("pdf")
+            .file_name()
+            .unwrap_or_default(),
+    );
     match latex_engine() {
-        Some("tectonic") => run_tool(
-            root,
-            "tectonic",
-            &["-X".as_ref(), "compile".as_ref(), main.as_ref(), "--keep-logs".as_ref(), "--outdir".as_ref(), out_dir.as_os_str()],
-            pdf,
-            parse_latex_log,
-        ),
-        Some(_) => {
-            let outdir = format!("-outdir={}", out_dir.display());
-            run_tool(
-                root,
-                "latexmk",
-                &[
-                    "-pdf".as_ref(),
-                    "-interaction=nonstopmode".as_ref(),
-                    "-file-line-error".as_ref(),
-                    "-halt-on-error".as_ref(),
-                    outdir.as_ref(),
-                    main.as_ref(),
-                ],
-                pdf,
-                parse_latex_log,
-            )
+        Some(engine) => {
+            let Some(tool) = find_tool(engine) else {
+                return missing_latex();
+            };
+            if engine == "tectonic" {
+                run_tool(
+                    root,
+                    &tool,
+                    engine,
+                    &[
+                        "-X".as_ref(),
+                        "compile".as_ref(),
+                        main.as_ref(),
+                        "--keep-logs".as_ref(),
+                        "--outdir".as_ref(),
+                        out_dir.as_os_str(),
+                    ],
+                    pdf,
+                    parse_latex_log,
+                )
+            } else {
+                let outdir = format!("-outdir={}", out_dir.display());
+                run_tool(
+                    root,
+                    &tool,
+                    engine,
+                    &[
+                        "-pdf".as_ref(),
+                        "-interaction=nonstopmode".as_ref(),
+                        "-file-line-error".as_ref(),
+                        "-halt-on-error".as_ref(),
+                        outdir.as_ref(),
+                        main.as_ref(),
+                    ],
+                    pdf,
+                    parse_latex_log,
+                )
+            }
         }
-        None => CompileOutput {
-            ok: false,
-            engine: "none".into(),
-            diagnostics: vec![Diagnostic {
-                severity: "error".into(),
-                file: None,
-                line: None,
-                message: "No LaTeX engine found. Install tectonic (recommended, self-contained) or a TeX distribution with latexmk.".into(),
-                hints: vec![],
-            }],
-            ..Default::default()
-        },
+        None => missing_latex(),
+    }
+}
+
+fn missing_latex() -> CompileOutput {
+    CompileOutput {
+        ok: false,
+        engine: "none".into(),
+        diagnostics: vec![Diagnostic {
+            severity: "error".into(),
+            file: None,
+            line: None,
+            message: "No LaTeX engine found. Open Set up this computer in LetsWritePaper to install tectonic, or install a TeX distribution that provides latexmk.".into(),
+            hints: vec![],
+        }],
+        ..Default::default()
     }
 }
 
 fn run_tool(
     root: &Path,
-    tool: &str,
+    tool: &Path,
+    engine: &str,
     args: &[&std::ffi::OsStr],
     pdf: PathBuf,
     parse: fn(&str, &Path) -> Vec<Diagnostic>,
@@ -170,16 +340,25 @@ fn run_tool(
     let (status_ok, log) = match output {
         Ok(o) => (
             o.status.success(),
-            format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+            format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
         ),
-        Err(e) => (false, format!("failed to run {tool}: {e}")),
+        Err(e) => (false, format!("failed to run {engine}: {e}")),
     };
     let mut diagnostics = parse(&log, root);
     // latexmk/tectonic keep a .log with more detail than stdout.
     if let Some(stem) = pdf.file_stem() {
-        if let Ok(full) = std::fs::read_to_string(pdf.with_file_name(format!("{}.log", stem.to_string_lossy()))) {
+        if let Ok(full) =
+            std::fs::read_to_string(pdf.with_file_name(format!("{}.log", stem.to_string_lossy())))
+        {
             for d in parse(&full, root) {
-                if !diagnostics.iter().any(|x| x.message == d.message && x.line == d.line) {
+                if !diagnostics
+                    .iter()
+                    .any(|x| x.message == d.message && x.line == d.line)
+                {
                     diagnostics.push(d);
                 }
             }
@@ -197,7 +376,7 @@ fn run_tool(
     }
     CompileOutput {
         ok: status_ok,
-        engine: tool.into(),
+        engine: engine.into(),
         pdf_path: pdf.exists().then_some(pdf),
         diagnostics,
         ..Default::default()
@@ -213,18 +392,35 @@ pub fn parse_latex_log(log: &str, _root: &Path) -> Vec<Diagnostic> {
         if let Some(d) = file_line_error(line) {
             out.push(d);
         } else if let Some(msg) = line.strip_prefix("! ") {
-            let line_no = lines[i + 1..]
-                .iter()
-                .take(10)
-                .find_map(|l| l.strip_prefix("l.").and_then(|r| r.split_whitespace().next()).and_then(|n| n.parse().ok()));
-            out.push(Diagnostic { severity: "error".into(), file: None, line: line_no, message: msg.trim().into(), hints: vec![] });
+            let line_no = lines[i + 1..].iter().take(10).find_map(|l| {
+                l.strip_prefix("l.")
+                    .and_then(|r| r.split_whitespace().next())
+                    .and_then(|n| n.parse().ok())
+            });
+            out.push(Diagnostic {
+                severity: "error".into(),
+                file: None,
+                line: line_no,
+                message: msg.trim().into(),
+                hints: vec![],
+            });
         } else if let Some(idx) = line.find("Warning: ") {
-            if line.starts_with("LaTeX") || line.starts_with("Package") || line.contains("Citation") || line.contains("Reference") {
+            if line.starts_with("LaTeX")
+                || line.starts_with("Package")
+                || line.contains("Citation")
+                || line.contains("Reference")
+            {
                 let msg = line[idx + 9..].trim().to_string();
                 let line_no = msg
                     .rsplit_once("on input line ")
                     .and_then(|(_, n)| n.trim_end_matches('.').parse().ok());
-                out.push(Diagnostic { severity: "warning".into(), file: None, line: line_no, message: msg, hints: vec![] });
+                out.push(Diagnostic {
+                    severity: "warning".into(),
+                    file: None,
+                    line: line_no,
+                    message: msg,
+                    hints: vec![],
+                });
             }
         }
     }
@@ -264,12 +460,24 @@ fn parse_typst_cli(log: &str, _root: &Path) -> Vec<Diagnostic> {
             continue;
         };
         // "   ┌─ main.typ:3:5"
-        let loc = lines.get(i + 1).and_then(|n| n.split("─ ").nth(1)).map(str::trim);
+        let loc = lines
+            .get(i + 1)
+            .and_then(|n| n.split("─ ").nth(1))
+            .map(str::trim);
         let (file, line) = match loc.and_then(|l| l.split_once(':')) {
-            Some((f, rest)) => (Some(f.to_string()), rest.split(':').next().and_then(|n| n.parse().ok())),
+            Some((f, rest)) => (
+                Some(f.to_string()),
+                rest.split(':').next().and_then(|n| n.parse().ok()),
+            ),
             None => (None, None),
         };
-        out.push(Diagnostic { severity: sev.into(), file, line, message: msg.into(), hints: vec![] });
+        out.push(Diagnostic {
+            severity: sev.into(),
+            file,
+            line,
+            message: msg.into(),
+            hints: vec![],
+        });
     }
     out
 }
@@ -289,22 +497,48 @@ mod tests {
         assert_eq!(d[2].line, Some(33));
     }
 
+    #[test]
+    fn app_bin_is_searched_before_path() {
+        let dirs = tool_search_dirs(
+            PathBuf::from("/app/bin"),
+            Some(PathBuf::from("/home/ada")),
+            [PathBuf::from("/usr/bin")],
+        );
+        assert_eq!(dirs[0], PathBuf::from("/app/bin"));
+        assert!(dirs.iter().any(|d| d.ends_with(".local/bin")));
+        assert_eq!(dirs.last().unwrap(), &PathBuf::from("/usr/bin"));
+    }
+
     #[cfg(feature = "typst")]
     #[test]
     fn compiles_typst_from_memory() {
         let dir = std::env::temp_dir().join(format!("paper-compile-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut sources = HashMap::new();
-        sources.insert("main.typ".to_string(), "= Hello\nThis is *live*. #include \"sec.typ\"".to_string());
+        sources.insert(
+            "main.typ".to_string(),
+            "= Hello\nThis is *live*. #include \"sec.typ\"".to_string(),
+        );
         sources.insert("sec.typ".to_string(), "Included text.".to_string());
         let mut c = Compiler::new();
-        let out = c.compile(&dir, "main.typ", &sources, CompileOptions { svg: true, pdf: true });
+        let out = c.compile(
+            &dir,
+            "main.typ",
+            &sources,
+            CompileOptions {
+                svg: true,
+                pdf: true,
+            },
+        );
         assert!(out.ok, "{:?}", out.diagnostics);
         assert_eq!(out.page_count, 1);
         assert!(out.svg_pages[0].contains("<svg"));
         assert!(out.pdf.as_ref().unwrap().starts_with(b"%PDF"));
 
-        sources.insert("main.typ".to_string(), "= Hello\n#undefined-thing".to_string());
+        sources.insert(
+            "main.typ".to_string(),
+            "= Hello\n#undefined-thing".to_string(),
+        );
         let bad = c.compile(&dir, "main.typ", &sources, CompileOptions::default());
         assert!(!bad.ok);
         assert_eq!(bad.diagnostics[0].line, Some(2));

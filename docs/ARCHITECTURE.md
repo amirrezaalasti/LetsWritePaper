@@ -7,11 +7,13 @@ Each paper source file (`.tex`, `.typ`, `.bib`, …) is a Yjs text document (`yr
 whoever makes it:
 
 ```
-updates(id, uid, doc, author_id, author_kind, author_name, session, origin, message, added, removed, created_at, data)
+updates(id, uid, doc, author_id, author_kind, author_name, session, origin, message, summary, added, removed, created_at, data)
 ```
 
 - `author_kind` is `human`, `agent`, `external` (a file changed by another tool) or `system`.
 - `message` holds the why: an agent's `rationale`, "accepted proposal #3", and similar.
+- `summary` is a one-line description of the text that changed (`§ Method: "SGD" → "Adam"`).
+  It is written for every edit, including ordinary typing, so the change log can show each one.
 - `data` holds the Yjs v1 update bytes.
 
 The same log serves four purposes:
@@ -19,8 +21,9 @@ The same log serves four purposes:
 1. **Sync between processes.** The app, MCP servers and CLI each open the project. They
    append their own updates and tail others' rows (`Workspace::poll`, triggered by
    `PRAGMA data_version`).
-2. **History.** Grouped into edit sessions (`history::group_log`). Any past state can be
-   rebuilt by replaying updates up to an id.
+2. **History.** The change log lists every update, with `summary` saying what changed.
+   The same rows can be grouped into edit sessions (`history::group_log`). Any past state
+   can be rebuilt by replaying updates up to an id.
 3. **Blame.** Every insert carries a formatting attribute `a = <author id>`, so authorship
    travels with the characters through merges. `PaperDoc::blame_runs` reads it back.
 4. **Sync between devices.** See below.
@@ -129,12 +132,20 @@ The app spawns the user's `claude` CLI:
 ```
 claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages \
   --mcp-config '{"mcpServers":{"paper":{"command":"<app>","args":["mcp","--agent","claude-code"]}}}' --strict-mcp-config \
-  --allowedTools "mcp__paper__*,Read,Grep,Glob" --append-system-prompt "…" [--permission-mode acceptEdits] [--resume <id>]
+  --allowedTools "mcp__paper__*,Read,Grep,Glob" --permission-prompt-tool stdio \
+  --append-system-prompt "…" [--permission-mode acceptEdits] [--resume <id>]
 ```
 
 - The app binary doubles as the MCP server (`letswritepaper mcp`), so a desktop install needs
   nothing else.
 - Stream events (`system/init`, `stream_event` text deltas, `assistant` tool calls, `user`
-  tool results, `result`) are forwarded to the panel.
+  tool results, `result`) are forwarded to the panel. A tool that is not pre-approved arrives
+  as a `control_request`; the panel shows Allow / Deny and writes the `control_response` back.
 - Each message carries editor context (file, line, section, selection).
 - Remote Control hand-off runs `claude --resume <id> --remote-control <title>` in a terminal.
+
+ChatGPT and Gemini use the same panel and the same event shape. ChatGPT spawns
+`codex exec --json` once per message (resumed by thread id) with the paper server passed
+as `mcp_servers.paper`. Gemini keeps one `agy --input-format stream-json` process open and
+writes the paper server into the workspace `.agents/mcp_config.json`. Their stdout is
+translated into the Claude events above before it reaches the panel.

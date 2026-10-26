@@ -1,0 +1,37 @@
+# fly.toml app configuration file generated for letswritepaper-relay on 2026-10-26T14:48:23+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'letswritepaper-relay'
+primary_region = 'ams'
+
+[build]
+  dockerfile = 'deploy/relay.Dockerfile'
+
+[[mounts]]
+  source = 'relay_data'
+  destination = '/data'
+  initial_size = '1gb'
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = false
+
+  [http_service.http_options]
+    idle_timeout = 60
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '15s'
+    method = 'GET'
+    path = '/v1/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'
+  cpus = 1
+  memory_mb = 256

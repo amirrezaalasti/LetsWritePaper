@@ -3699,6 +3699,7 @@ name = "paper-compile"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "paper-core",
  "serde",
  "serde_json",
  "time",

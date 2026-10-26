@@ -44,7 +44,13 @@ pub fn compute_edits(old: &str, new: &str) -> Vec<Edit> {
         if let Some((o0, o1, n0, n1)) = r {
             let ob = (old_starts[o0], old_starts[o1]);
             let nb = (new_starts[n0], new_starts[n1]);
-            refine(&old_mid[ob.0..ob.1], &new_mid[nb.0..nb.1], prefix + ob.0, deadline, edits);
+            refine(
+                &old_mid[ob.0..ob.1],
+                &new_mid[nb.0..nb.1],
+                prefix + ob.0,
+                deadline,
+                edits,
+            );
         }
     };
     for op in lines.ops() {
@@ -66,12 +72,26 @@ pub fn compute_edits(old: &str, new: &str) -> Vec<Edit> {
 /// Char-level diff inside one changed region; `base` is its byte offset in the full text.
 fn refine(old: &str, new: &str, base: usize, deadline: Instant, out: &mut Vec<Edit>) {
     if old.is_empty() || new.is_empty() || old.len() + new.len() > 20_000 {
-        out.push(Edit { start: base, end: base + old.len(), insert: new.to_string() });
+        out.push(Edit {
+            start: base,
+            end: base + old.len(),
+            insert: new.to_string(),
+        });
         return;
     }
-    let diff = TextDiff::configure().deadline(deadline).diff_chars(old, new);
-    let old_chars: Vec<usize> = old.char_indices().map(|(i, _)| i).chain([old.len()]).collect();
-    let new_chars: Vec<usize> = new.char_indices().map(|(i, _)| i).chain([new.len()]).collect();
+    let diff = TextDiff::configure()
+        .deadline(deadline)
+        .diff_chars(old, new);
+    let old_chars: Vec<usize> = old
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([old.len()])
+        .collect();
+    let new_chars: Vec<usize> = new
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([new.len()])
+        .collect();
     let mut pending: Option<Edit> = None;
     for op in diff.ops() {
         if let DiffOp::Equal { .. } = op {
@@ -88,7 +108,11 @@ fn refine(old: &str, new: &str, base: usize, deadline: Instant, out: &mut Vec<Ed
             }
             _ => {
                 out.extend(pending.take());
-                pending = Some(Edit { start: base + os, end: base + oe, insert: ins.to_string() });
+                pending = Some(Edit {
+                    start: base + os,
+                    end: base + oe,
+                    insert: ins.to_string(),
+                });
             }
         }
     }
@@ -198,17 +222,25 @@ pub struct Hunk {
 /// Word-level hunks between two texts, `context` lines around each change.
 pub fn word_hunks(old: &str, new: &str, context: usize) -> Vec<Hunk> {
     let deadline = Instant::now() + Duration::from_millis(500);
-    let lines = TextDiff::configure().deadline(deadline).diff_lines(old, new);
+    let lines = TextDiff::configure()
+        .deadline(deadline)
+        .diff_lines(old, new);
     let old_starts = line_starts(old);
     let new_starts = line_starts(new);
     let mut hunks = vec![];
     for group in lines.grouped_ops(context) {
-        let (Some(first), Some(last)) = (group.first(), group.last()) else { continue };
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
         let o = first.old_range().start..last.old_range().end;
         let n = first.new_range().start..last.new_range().end;
-        let old_seg = &old[old_starts[o.start.min(old_starts.len() - 1)]..old_starts[o.end.min(old_starts.len() - 1)]];
-        let new_seg = &new[new_starts[n.start.min(new_starts.len() - 1)]..new_starts[n.end.min(new_starts.len() - 1)]];
-        let words = TextDiff::configure().deadline(deadline).diff_words(old_seg, new_seg);
+        let old_seg = &old[old_starts[o.start.min(old_starts.len() - 1)]
+            ..old_starts[o.end.min(old_starts.len() - 1)]];
+        let new_seg = &new[new_starts[n.start.min(new_starts.len() - 1)]
+            ..new_starts[n.end.min(new_starts.len() - 1)]];
+        let words = TextDiff::configure()
+            .deadline(deadline)
+            .diff_words(old_seg, new_seg);
         let mut segments: Vec<Segment> = vec![];
         for change in words.iter_all_changes() {
             let kind = match change.tag() {
@@ -218,10 +250,17 @@ pub fn word_hunks(old: &str, new: &str, context: usize) -> Vec<Hunk> {
             };
             match segments.last_mut() {
                 Some(s) if s.kind == kind => s.text.push_str(change.value()),
-                _ => segments.push(Segment { kind, text: change.value().to_string() }),
+                _ => segments.push(Segment {
+                    kind,
+                    text: change.value().to_string(),
+                }),
             }
         }
-        hunks.push(Hunk { old_line: o.start + 1, new_line: n.start + 1, segments });
+        hunks.push(Hunk {
+            old_line: o.start + 1,
+            new_line: n.start + 1,
+            segments,
+        });
     }
     hunks
 }
@@ -262,7 +301,10 @@ mod tests {
         let cases = [
             ("", "hello"),
             ("hello", ""),
-            ("the cat sat\non the mat\n", "the cat sat\non a mat\nand slept\n"),
+            (
+                "the cat sat\non the mat\n",
+                "the cat sat\non a mat\nand slept\n",
+            ),
             ("α β γ\nδ\n", "α b γ\nδ ε\n"),
             ("a\nb\nc\nd\n", "a\nc\nb\nd\n"),
             ("😀 emoji line\nsecond", "😀 emoji lines\nsecond 😀"),

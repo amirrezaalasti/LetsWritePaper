@@ -35,14 +35,20 @@ pub fn write_agent_config(project: &Project, launcher: &Launcher) -> Result<Vec<
     std::fs::create_dir_all(root.join(".claude"))?;
     let mut settings: Value = read_json(&settings_path).unwrap_or_else(|| json!({}));
     let hook_cmd = format!("\"{exe}\" ingest --from-hook --author agent:claude-code");
-    let mut hooks = settings["hooks"]["PostToolUse"].as_array().cloned().unwrap_or_default();
+    let mut hooks = settings["hooks"]["PostToolUse"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     hooks.retain(|h| !h.to_string().contains("ingest --from-hook"));
     hooks.push(json!({
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [{ "type": "command", "command": hook_cmd }]
     }));
     settings["hooks"]["PostToolUse"] = Value::Array(hooks);
-    std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)? + "\n")?;
+    std::fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&settings)? + "\n",
+    )?;
     written.push(".claude/settings.json".to_string());
 
     if !root.join("AGENTS.md").exists() {
@@ -64,7 +70,9 @@ fn read_json(path: &Path) -> Option<Value> {
 /// to a paper project, record its new content as an edit by `author`.
 /// Returns a short message for the hook's stderr.
 pub fn ingest_from_hook(payload: &str, author: &Author) -> Result<Option<String>> {
-    let Ok(v) = serde_json::from_str::<Value>(payload) else { return Ok(None) };
+    let Ok(v) = serde_json::from_str::<Value>(payload) else {
+        return Ok(None);
+    };
     let Some(file) = v
         .pointer("/tool_input/file_path")
         .or_else(|| v.pointer("/tool_input/path"))
@@ -72,16 +80,25 @@ pub fn ingest_from_hook(payload: &str, author: &Author) -> Result<Option<String>
     else {
         return Ok(None);
     };
-    let cwd = v.get("cwd").and_then(Value::as_str).map(std::path::PathBuf::from);
+    let cwd = v
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(std::path::PathBuf::from);
     let abs = match (Path::new(file).is_absolute(), cwd) {
         (true, _) => Path::new(file).to_path_buf(),
         (false, Some(c)) => c.join(file),
         (false, None) => std::env::current_dir()?.join(file),
     };
     let abs = abs.canonicalize().unwrap_or(abs);
-    let Some(dir) = abs.parent() else { return Ok(None) };
-    let Ok(project) = Project::discover(dir) else { return Ok(None) };
-    let Some(rel) = project.relative(&abs) else { return Ok(None) };
+    let Some(dir) = abs.parent() else {
+        return Ok(None);
+    };
+    let Ok(project) = Project::discover(dir) else {
+        return Ok(None);
+    };
+    let Some(rel) = project.relative(&abs) else {
+        return Ok(None);
+    };
     if !project.is_tracked_path(&rel) {
         return Ok(None);
     }
@@ -122,15 +139,29 @@ mod tests {
         // First open as owner imports files.
         drop(Workspace::open(project.clone(), Ownership::Auto).unwrap());
         let main = project.root.join("main.tex");
-        let text = std::fs::read_to_string(&main).unwrap().replace("\\section{Method}", "\\section{Approach}");
+        let text = std::fs::read_to_string(&main)
+            .unwrap()
+            .replace("\\section{Method}", "\\section{Approach}");
         std::fs::write(&main, text).unwrap();
-        let payload = json!({ "tool_name": "Edit", "tool_input": { "file_path": main.to_string_lossy() } }).to_string();
-        let msg = ingest_from_hook(&payload, &Author::agent("claude-code")).unwrap().unwrap();
+        let payload =
+            json!({ "tool_name": "Edit", "tool_input": { "file_path": main.to_string_lossy() } })
+                .to_string();
+        let msg = ingest_from_hook(&payload, &Author::agent("claude-code"))
+            .unwrap()
+            .unwrap();
         assert!(msg.contains("main.tex"));
         let ws = Workspace::open(project, Ownership::Never).unwrap();
-        assert_eq!(ws.log(Some("main.tex"), 1).unwrap()[0].author.id, "agent:claude-code");
+        assert_eq!(
+            ws.log(Some("main.tex"), 1).unwrap()[0].author.id,
+            "agent:claude-code"
+        );
         // Unrelated files are ignored.
-        assert!(ingest_from_hook(r#"{"tool_input":{"file_path":"/tmp/nope.txt"}}"#, &Author::agent("x")).unwrap().is_none());
+        assert!(ingest_from_hook(
+            r#"{"tool_input":{"file_path":"/tmp/nope.txt"}}"#,
+            &Author::agent("x")
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -138,8 +169,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project = Project::init(dir.path(), "Cfg", crate::Format::Latex).unwrap();
         std::fs::create_dir_all(project.root.join(".claude")).unwrap();
-        std::fs::write(project.root.join(".claude/settings.json"), r#"{"permissions":{"allow":["Bash(ls)"]}}"#).unwrap();
-        let l = Launcher { exe: Path::new("/usr/local/bin/paper") };
+        std::fs::write(
+            project.root.join(".claude/settings.json"),
+            r#"{"permissions":{"allow":["Bash(ls)"]}}"#,
+        )
+        .unwrap();
+        let l = Launcher {
+            exe: Path::new("/usr/local/bin/paper"),
+        };
         write_agent_config(&project, &l).unwrap();
         write_agent_config(&project, &l).unwrap();
         let s: Value = read_json(&project.root.join(".claude/settings.json")).unwrap();

@@ -22,9 +22,16 @@ use crate::{CompileOptions, CompileOutput, Diagnostic};
 struct UreqDownloader;
 
 impl typst_kit::downloader::Downloader for UreqDownloader {
-    fn stream(&self, _key: &dyn std::any::Any, url: &str) -> std::io::Result<(Option<usize>, Box<dyn Read>)> {
+    fn stream(
+        &self,
+        _key: &dyn std::any::Any,
+        url: &str,
+    ) -> std::io::Result<(Option<usize>, Box<dyn Read>)> {
         let response = ureq::get(url)
-            .header("User-Agent", concat!("letswritepaper/", env!("CARGO_PKG_VERSION")))
+            .header(
+                "User-Agent",
+                concat!("letswritepaper/", env!("CARGO_PKG_VERSION")),
+            )
             .call()
             .map_err(std::io::Error::other)?;
         let len = response
@@ -109,46 +116,80 @@ impl TypstEngine {
         let mut fonts = FontStore::new();
         fonts.extend(typst_kit::fonts::embedded());
         fonts.extend(typst_kit::fonts::system());
-        TypstEngine { library: LazyHash::new(Library::default()), fonts }
+        TypstEngine {
+            library: LazyHash::new(Library::default()),
+            fonts,
+        }
     }
 
-    pub fn compile(&self, root: &Path, main: &str, sources: &HashMap<String, String>, opts: CompileOptions) -> CompileOutput {
-        let mut out = CompileOutput { engine: "typst".into(), ..Default::default() };
+    pub fn compile(
+        &self,
+        root: &Path,
+        main: &str,
+        sources: &HashMap<String, String>,
+        opts: CompileOptions,
+    ) -> CompileOutput {
+        let mut out = CompileOutput {
+            engine: "typst".into(),
+            ..Default::default()
+        };
         let Some(main_id) = file_id(main) else {
-            out.diagnostics.push(error(format!("invalid main file path: {main}")));
+            out.diagnostics
+                .push(error(format!("invalid main file path: {main}")));
             return out;
         };
-        let system = SystemFiles::new(FsRoot::new(root.to_path_buf()), SystemPackages::new(UreqDownloader));
+        let system = SystemFiles::new(
+            FsRoot::new(root.to_path_buf()),
+            SystemPackages::new(UreqDownloader),
+        );
         let world = PaperWorld {
             engine: self,
-            files: FileStore::new(OverlayLoader { overlay: sources.clone(), system: Arc::new(system) }),
+            files: FileStore::new(OverlayLoader {
+                overlay: sources.clone(),
+                system: Arc::new(system),
+            }),
             main: main_id,
         };
         let result = typst::compile::<PagedDocument>(&world);
-        out.diagnostics.extend(result.warnings.iter().map(|d| convert(&world, d)));
+        out.diagnostics
+            .extend(result.warnings.iter().map(|d| convert(&world, d)));
         match result.output {
             Ok(doc) => {
                 out.page_count = doc.pages().len();
                 if opts.svg {
                     let svg_opts = typst_svg::SvgOptions::default();
-                    out.svg_pages = doc.pages().iter().map(|p| typst_svg::svg(p, &svg_opts)).collect();
+                    out.svg_pages = doc
+                        .pages()
+                        .iter()
+                        .map(|p| typst_svg::svg(p, &svg_opts))
+                        .collect();
                 }
                 if opts.pdf {
                     match typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default()) {
                         Ok(bytes) => out.pdf = Some(bytes),
-                        Err(errs) => out.diagnostics.extend(errs.iter().map(|d| convert(&world, d))),
+                        Err(errs) => out
+                            .diagnostics
+                            .extend(errs.iter().map(|d| convert(&world, d))),
                     }
                 }
                 out.ok = !out.diagnostics.iter().any(|d| d.severity == "error");
             }
-            Err(errs) => out.diagnostics.extend(errs.iter().map(|d| convert(&world, d))),
+            Err(errs) => out
+                .diagnostics
+                .extend(errs.iter().map(|d| convert(&world, d))),
         }
         out
     }
 }
 
 fn error(message: String) -> Diagnostic {
-    Diagnostic { severity: "error".into(), file: None, line: None, message, hints: vec![] }
+    Diagnostic {
+        severity: "error".into(),
+        file: None,
+        line: None,
+        message,
+        hints: vec![],
+    }
 }
 
 fn convert(world: &PaperWorld, d: &SourceDiagnostic) -> Diagnostic {

@@ -1,7 +1,7 @@
 // Sidebar panels: files, outline, history, review, skills, agents.
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { api, type DocDiff, type LogEntry, type ProjectInfo, type Proposal, type ReviewComment, type ReviewRound } from "./api";
+import { api, type Change, type DocDiff, type LogEntry, type ProjectInfo, type Proposal, type ReviewComment, type ReviewRound } from "./api";
 import type { Editors } from "./editor";
 import { authorBadge, clear, form, guard, h, showModal, timeAgo, toast } from "./ui";
 
@@ -18,7 +18,7 @@ export type PanelId = "files" | "outline" | "history" | "review" | "skills" | "a
 export const PANELS: { id: PanelId; icon: string; label: string }[] = [
   { id: "files", icon: "▤", label: "Documents" },
   { id: "outline", icon: "☰", label: "Outline & section skills" },
-  { id: "history", icon: "⟲", label: "History & checkpoints" },
+  { id: "history", icon: "⟲", label: "Change log & checkpoints" },
   { id: "review", icon: "✎", label: "Peer review & suggestions" },
   { id: "skills", icon: "✦", label: "Skills" },
   { id: "agents", icon: "◆", label: "Agents" },
@@ -214,14 +214,31 @@ const MILESTONES: [string, string][] = [
   ["arxiv", "Milestone: arXiv"],
 ];
 
-let historyFilter = { thisDoc: false, agentsOnly: false };
+let historyFilter = { thisDoc: false, mine: false, sessions: false };
+
+function dayLabel(ms: number): string {
+  const d = new Date(ms);
+  const start = (t: Date) => new Date(t.getFullYear(), t.getMonth(), t.getDate()).getTime();
+  const diff = start(new Date()) - start(d);
+  if (diff === 0) return "Today";
+  if (diff === 86_400_000) return "Yesterday";
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+  });
+}
 
 async function historyPanel(el: HTMLElement, ctx: PanelContext) {
-  const [cps, log] = await Promise.all([
+  await ctx.editors.flushAll();
+  const path = historyFilter.thisDoc && ctx.editors.active ? ctx.editors.active : undefined;
+  const author = historyFilter.mine ? ctx.info.me.id : undefined;
+  const [cps, changes, sessions] = await Promise.all([
     api.checkpoints(),
-    api.history(historyFilter.thisDoc && ctx.editors.active ? ctx.editors.active : undefined, 150),
+    historyFilter.sessions ? Promise.resolve([] as Change[]) : api.changes(path, author, 200),
+    historyFilter.sessions ? api.history(path, 150) : Promise.resolve([] as LogEntry[]),
   ]);
-  const entries = historyFilter.agentsOnly ? log.filter((e) => e.author.kind === "agent") : log;
+  const sessionEntries = historyFilter.mine ? sessions.filter((e) => e.author.id === ctx.info.me.id) : sessions;
   const checkpointBtn = h("button", {
     class: "small primary",
     onclick: async () => {
@@ -271,6 +288,8 @@ async function historyPanel(el: HTMLElement, ctx: PanelContext) {
       label,
     );
 
+  const logBody = historyFilter.sessions ? sessionList(sessionEntries) : changeList(changes);
+
   clear(
     el,
     header("History", blame, compare, checkpointBtn),
@@ -305,11 +324,67 @@ async function historyPanel(el: HTMLElement, ctx: PanelContext) {
         : h("p", { class: "muted" }, "No checkpoints yet."),
     ),
     section(
-      "Activity",
-      h("div", { class: "filters" }, toggle("This document", "thisDoc"), toggle("Agents only", "agentsOnly")),
-      h("ul", { class: "list activity" }, ...entries.map((e) => activityRow(e))),
+      "Change log",
+      h("p", { class: "muted small-text" }, "Every edit is saved on its own. Click an entry to see the exact change."),
+      h("div", { class: "filters" }, toggle("This document", "thisDoc"), toggle("My edits", "mine"), toggle("Group into sessions", "sessions")),
+      logBody,
     ),
   );
+}
+
+function changeList(changes: Change[]): HTMLElement {
+  if (!changes.length) return h("p", { class: "muted" }, "No changes yet.");
+  const groups: { label: string; items: Change[] }[] = [];
+  for (const c of changes) {
+    const label = dayLabel(c.created_at);
+    const last = groups[groups.length - 1];
+    if (last?.label === label) last.items.push(c);
+    else groups.push({ label, items: [c] });
+  }
+  return h(
+    "div",
+    {},
+    ...groups.map((g) =>
+      h(
+        "div",
+        {},
+        h("div", { class: "day-label" }, g.label),
+        h("ul", { class: "list change-list" }, ...g.items.map((c) => changeRow(c))),
+      ),
+    ),
+  );
+}
+
+function changeRow(c: Change): HTMLElement {
+  return h(
+    "li",
+    {
+      class: "activity-row",
+      title: "Show this change",
+      onclick: () => showDiff(`${c.author.name} · ${c.doc}`, `#${Math.max(c.id - 1, 0)}`, `#${c.id}`, c.doc),
+    },
+    h("div", { class: "row-top" }, authorBadge(c.author), h("span", { class: "spacer" }), h("span", { class: "muted" }, timeAgo(c.created_at))),
+    h("div", { class: "row-mid" }, h("span", { class: "grow" }, c.doc), h("span", { class: "plus" }, `+${c.added}`), h("span", { class: "minus" }, `−${c.removed}`)),
+    h("div", { class: "row-msg" }, ...summaryParts(c.summary)),
+    c.rationale ? h("div", { class: "row-why" }, c.rationale) : null,
+  );
+}
+
+function summaryParts(summary: string): (Node | string)[] {
+  const arrow = summary.indexOf(" → ");
+  if (arrow !== -1) {
+    return [h("span", { class: "chg-del" }, summary.slice(0, arrow)), " → ", h("span", { class: "chg-add" }, summary.slice(arrow + 3))];
+  }
+  const added = summary.match(/^(.*?\badded )([\s\S]*)$/);
+  if (added) return [added[1], h("span", { class: "chg-add" }, added[2])];
+  const removed = summary.match(/^(.*?\bremoved )([\s\S]*)$/);
+  if (removed) return [removed[1], h("span", { class: "chg-del" }, removed[2])];
+  return [summary];
+}
+
+function sessionList(entries: LogEntry[]): HTMLElement {
+  if (!entries.length) return h("p", { class: "muted" }, "No sessions yet.");
+  return h("ul", { class: "list change-list" }, ...entries.map((e) => activityRow(e)));
 }
 
 function activityRow(e: LogEntry): HTMLElement {
@@ -652,7 +727,7 @@ async function agentsPanel(el: HTMLElement, _ctx: PanelContext) {
       "Prompts (slash commands in Claude Code)",
       h("ul", { class: "list" }, ...prompts.map(([c, d]) => h("li", { class: "row" }, h("code", { class: "grow" }, c), h("span", { class: "muted" }, d), copy(c)))),
     ),
-    section("Recent agent activity", agentLog.length ? h("ul", { class: "list activity" }, ...agentLog.map(activityRow)) : h("p", { class: "muted" }, "No agent edits yet.")),
+    section("Recent agent activity", agentLog.length ? h("ul", { class: "list change-list" }, ...agentLog.map(activityRow)) : h("p", { class: "muted" }, "No agent edits yet.")),
   );
 }
 

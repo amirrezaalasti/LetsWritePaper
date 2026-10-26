@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -82,5 +83,66 @@ jobs:
           projectPath: app
           tagName: ${{ github.ref_name }}
           releaseName: LetsWritePaper ${{ github.ref_name }}
+          # The publish job below makes the release public after every installer is attached.
           releaseDraft: true
           args: ${{ matrix.args }}
+      - name: Attach LetsWritePaper-x64-setup.exe
+        if: runner.os == 'Windows'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $src = Get-ChildItem "app/src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $src) { throw "The Windows setup.exe was not built." }
+          Copy-Item $src.FullName "LetsWritePaper-x64-setup.exe"
+          gh release upload "${{ github.ref_name }}" "LetsWritePaper-x64-setup.exe" --clobber
+      - name: Attach LetsWritePaper-macos.dmg
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dmg=$(find app/src-tauri/target -path '*/bundle/dmg/*.dmg' -print | head -n 1)
+          if [[ -z "$dmg" ]]; then
+            echo "The macOS disk image was not built." >&2
+            exit 1
+          fi
+          cp "$dmg" LetsWritePaper-macos.dmg
+          gh release upload "${{ github.ref_name }}" LetsWritePaper-macos.dmg --clobber
+      - name: Attach LetsWritePaper-x64.AppImage
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          img=$(find app/src-tauri/target -path '*/bundle/appimage/*.AppImage' -print | head -n 1)
+          if [[ -z "$img" ]]; then
+            echo "The AppImage was not built." >&2
+            exit 1
+          fi
+          cp "$img" LetsWritePaper-x64.AppImage
+          gh release upload "${{ github.ref_name }}" LetsWritePaper-x64.AppImage --clobber
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Install
+
+          **Windows.** Download and run [LetsWritePaper-x64-setup.exe](https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/LetsWritePaper-x64-setup.exe).
+
+          **macOS.** Download and open [LetsWritePaper-macos.dmg](https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/LetsWritePaper-macos.dmg).
+
+          **Linux.** Download [LetsWritePaper-x64.AppImage](https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/LetsWritePaper-x64.AppImage), mark it executable, and run it.
+
+          No clone or compiler is required. The first time the app opens, its setup wizard asks for your name and can install tectonic and Claude Code.
+          EOF
+          gh release edit "${{ github.ref_name }}" --draft=false --latest \
+            --title "LetsWritePaper ${{ github.ref_name }}" \
+            --notes-file notes.md

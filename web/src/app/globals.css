@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+:root {
+  --paper: #f3f0e8;
+  --sheet: #fffdf8;
+  --ink: #1c1915;
+  --muted: #5f584e;
+  --line: #e3dcd0;
+  --line-strong: #cfc6b6;
+  --accent: #2f6bf0;
+  --accent-ink: #173ea8;
+  --agent: #7a3fbe;
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-sheet: var(--sheet);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-agent: var(--agent);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-newsreader), "Iowan Old Style", Palatino, serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+body {
+  background-color: var(--paper);
+  background-image:
+    radial-gradient(900px 420px at 0% -10%, rgba(47, 107, 240, 0.08), transparent 55%),
+    linear-gradient(180deg, rgba(255, 253, 248, 0.7), transparent 320px);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: rgba(47, 107, 240, 0.22);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}

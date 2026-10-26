@@ -6,14 +6,14 @@
 //! `.paper/owner.lock` — mirrors documents to their files on disk and turns
 //! on-disk edits made by other tools into attributed CRDT updates.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 
 use serde::{Deserialize, Serialize};
 
 use crate::author::Author;
 use crate::doc::{BlameRun, PaperDoc};
-use crate::history::{diff_doc, group_log, DocDiff, LogEntry, VersionRef};
+use crate::history::{diff_doc, group_log, summarize_edits, Change, DocDiff, LogEntry, VersionRef};
 use crate::outline::{find_section, outline, section_at, Section};
 use crate::project::{normalize_rel, Project};
 use crate::review::{self, ReviewComment, ReviewRound, Scores};
@@ -34,9 +34,17 @@ pub enum Ownership {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkspaceEvent {
-    DocUpdate { path: String, update: Vec<u8>, author: Author },
-    DocAdded { path: String },
-    DocRemoved { path: String },
+    DocUpdate {
+        path: String,
+        update: Vec<u8>,
+        author: Author,
+    },
+    DocAdded {
+        path: String,
+    },
+    DocRemoved {
+        path: String,
+    },
     /// Checkpoints, proposals, reviews or skills may have changed.
     MetaChanged,
 }
@@ -53,7 +61,10 @@ pub enum Resolved {
     Now,
     /// State after this local update id.
     Upto(i64),
-    Checkpoint { uid: String, update_id: i64 },
+    Checkpoint {
+        uid: String,
+        update_id: i64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -135,7 +146,10 @@ impl Workspace {
         let last_seen = store.max_update_id()?;
         let mut docs = BTreeMap::new();
         for path in store.documents()? {
-            docs.insert(path.clone(), PaperDoc::from_updates(store.doc_updates(&path, Some(last_seen))?)?);
+            docs.insert(
+                path.clone(),
+                PaperDoc::from_updates(store.doc_updates(&path, Some(last_seen))?)?,
+            );
         }
         let data_version = store.data_version()?;
         let skills = SkillRegistry::load(Some(&project));
@@ -206,7 +220,9 @@ impl Workspace {
     }
 
     fn doc(&self, path: &str) -> Result<&PaperDoc> {
-        self.docs.get(path).ok_or_else(|| Error::NoDocument(path.into()))
+        self.docs
+            .get(path)
+            .ok_or_else(|| Error::NoDocument(path.into()))
     }
 
     pub fn text(&self, path: &str) -> Result<String> {
@@ -228,7 +244,9 @@ impl Workspace {
         let path = normalize_rel(path)?;
         let text = self.doc(&path)?.text();
         let sections = outline(&path, &text);
-        let s = find_section(&sections, query).ok_or_else(|| Error::NoSection(query.into()))?.clone();
+        let s = find_section(&sections, query)
+            .ok_or_else(|| Error::NoSection(query.into()))?
+            .clone();
         let body = text[s.start..s.end].to_string();
         Ok((s, body))
     }
@@ -246,32 +264,53 @@ impl Workspace {
 
     // ---- writing -----------------------------------------------------------
 
-    fn record(&mut self, path: &str, update: Vec<u8>, author: &Author, message: Option<&str>, before: &str, emit: bool) -> Result<i64> {
+    fn record(
+        &mut self,
+        path: &str,
+        update: Vec<u8>,
+        author: &Author,
+        message: Option<&str>,
+        before: &str,
+        emit: bool,
+    ) -> Result<i64> {
         let after = self.doc(path)?.text();
+        let edits = compute_edits(before, &after);
         let (mut added, mut removed) = (0i64, 0i64);
-        for e in compute_edits(before, &after) {
+        for e in &edits {
             removed += before[e.start..e.end].chars().count() as i64;
             added += e.insert.chars().count() as i64;
         }
+        let summary = summarize_edits(path, before, &after, &edits);
         let id = self.store.insert_update(&NewUpdate {
             doc: path,
             author,
             session: &self.session,
             origin: &self.origin,
             message,
+            summary: Some(&summary),
             added,
             removed,
             data: &update,
         })?;
         self.applied.insert(path.to_string(), id);
         if emit {
-            self.events.push(WorkspaceEvent::DocUpdate { path: path.into(), update, author: author.clone() });
+            self.events.push(WorkspaceEvent::DocUpdate {
+                path: path.into(),
+                update,
+                author: author.clone(),
+            });
         }
         self.materialize(path)?;
         Ok(id)
     }
 
-    pub fn create_document(&mut self, path: &str, content: &str, author: &Author, message: Option<&str>) -> Result<Option<i64>> {
+    pub fn create_document(
+        &mut self,
+        path: &str,
+        content: &str,
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<Option<i64>> {
         let path = normalize_rel(path)?;
         if self.docs.contains_key(&path) {
             return Err(Error::Invalid(format!("document already exists: {path}")));
@@ -280,9 +319,12 @@ impl Workspace {
         let doc = PaperDoc::new();
         let update = doc.set_text(&author.id, content);
         self.docs.insert(path.clone(), doc);
-        self.events.push(WorkspaceEvent::DocAdded { path: path.clone() });
+        self.events
+            .push(WorkspaceEvent::DocAdded { path: path.clone() });
         match update {
-            Some(u) => self.record(&path, u, author, message.or(Some("created")), "", true).map(Some),
+            Some(u) => self
+                .record(&path, u, author, message.or(Some("created")), "", true)
+                .map(Some),
             None => {
                 self.materialize(&path)?;
                 Ok(None)
@@ -306,7 +348,13 @@ impl Workspace {
     }
 
     /// Apply an update produced by an editor replica (Yjs in the app).
-    pub fn apply_update(&mut self, path: &str, update: &[u8], author: &Author, message: Option<&str>) -> Result<i64> {
+    pub fn apply_update(
+        &mut self,
+        path: &str,
+        update: &[u8],
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<i64> {
         let path = normalize_rel(path)?;
         let doc = self.doc(&path)?;
         let before = doc.text();
@@ -315,40 +363,74 @@ impl Workspace {
     }
 
     /// Replace a UTF-16 range of a document.
-    pub fn splice(&mut self, path: &str, start: u32, end: u32, insert: &str, author: &Author, message: Option<&str>) -> Result<Option<i64>> {
+    pub fn splice(
+        &mut self,
+        path: &str,
+        start: u32,
+        end: u32,
+        insert: &str,
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<Option<i64>> {
         let path = normalize_rel(path)?;
         let doc = self.doc(&path)?;
         let before = doc.text();
         let len = doc.len_utf16();
         if start > end || end > len {
-            return Err(Error::Invalid(format!("range {start}..{end} out of bounds (length {len})")));
+            return Err(Error::Invalid(format!(
+                "range {start}..{end} out of bounds (length {len})"
+            )));
         }
         match doc.splice(&author.id, start, end, insert) {
-            Some(u) => self.record(&path, u, author, message, &before, true).map(Some),
+            Some(u) => self
+                .record(&path, u, author, message, &before, true)
+                .map(Some),
             None => Ok(None),
         }
     }
 
     /// Make a document's text equal `new_text` with minimal edits.
-    pub fn set_text(&mut self, path: &str, new_text: &str, author: &Author, message: Option<&str>) -> Result<Option<i64>> {
+    pub fn set_text(
+        &mut self,
+        path: &str,
+        new_text: &str,
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<Option<i64>> {
         let path = normalize_rel(path)?;
         let doc = self.doc(&path)?;
         let before = doc.text();
         match doc.set_text(&author.id, new_text) {
-            Some(u) => self.record(&path, u, author, message, &before, true).map(Some),
+            Some(u) => self
+                .record(&path, u, author, message, &before, true)
+                .map(Some),
             None => Ok(None),
         }
     }
 
     /// Replace an exact excerpt. `occurrence` (1-based) picks among repeats;
     /// without it the excerpt must be unique.
-    pub fn edit(&mut self, path: &str, old: &str, new: &str, occurrence: Option<usize>, author: &Author, message: Option<&str>) -> Result<EditOutcome> {
+    pub fn edit(
+        &mut self,
+        path: &str,
+        old: &str,
+        new: &str,
+        occurrence: Option<usize>,
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<EditOutcome> {
         let path = normalize_rel(path)?;
         let text = self.doc(&path)?.text();
         let at = locate(&path, &text, old, occurrence)?;
         let edits: Vec<_> = compute_edits(old, new)
             .into_iter()
-            .map(|e| (utf16_offset(&text, at + e.start), utf16_offset(&text, at + e.end), e.insert))
+            .map(|e| {
+                (
+                    utf16_offset(&text, at + e.start),
+                    utf16_offset(&text, at + e.end),
+                    e.insert,
+                )
+            })
             .collect();
         let line = line_of(&text, at);
         let update = self.doc(&path)?.apply_edits(&author.id, &edits);
@@ -373,12 +455,19 @@ impl Workspace {
         let live = self.store.documents()?;
         for path in &live {
             if !self.docs.contains_key(path) {
-                let doc = PaperDoc::from_updates(self.store.doc_updates(path, Some(self.last_seen))?)?;
+                let doc =
+                    PaperDoc::from_updates(self.store.doc_updates(path, Some(self.last_seen))?)?;
                 self.docs.insert(path.clone(), doc);
-                self.events.push(WorkspaceEvent::DocAdded { path: path.clone() });
+                self.events
+                    .push(WorkspaceEvent::DocAdded { path: path.clone() });
             }
         }
-        let removed: Vec<String> = self.docs.keys().filter(|p| !live.contains(p)).cloned().collect();
+        let removed: Vec<String> = self
+            .docs
+            .keys()
+            .filter(|p| !live.contains(p))
+            .cloned()
+            .collect();
         for path in removed {
             self.docs.remove(&path);
             self.materialized.remove(&path);
@@ -392,13 +481,19 @@ impl Workspace {
         let mut seen = self.last_seen;
         for rec in self.store.updates_since(self.last_seen, &self.origin)? {
             seen = seen.max(rec.meta.id);
-            let Some(doc) = self.docs.get(&rec.meta.doc) else { continue };
+            let Some(doc) = self.docs.get(&rec.meta.doc) else {
+                continue;
+            };
             doc.apply_update(&rec.data)?;
             self.applied.insert(rec.meta.doc.clone(), rec.meta.id);
             if !changed.contains(&rec.meta.doc) {
                 changed.push(rec.meta.doc.clone());
             }
-            self.events.push(WorkspaceEvent::DocUpdate { path: rec.meta.doc, update: rec.data, author: rec.meta.author });
+            self.events.push(WorkspaceEvent::DocUpdate {
+                path: rec.meta.doc,
+                update: rec.data,
+                author: rec.meta.author,
+            });
         }
         self.last_seen = seen.max(max);
         for path in changed {
@@ -425,9 +520,13 @@ impl Workspace {
             }
             std::fs::write(&abs, &text)?;
         }
-        let entry = MirrorEntry { hash: content_hash(&text), upto: self.applied_upto(path) };
+        let entry = MirrorEntry {
+            hash: content_hash(&text),
+            upto: self.applied_upto(path),
+        };
         self.write_mirror_entry(path, Some(entry));
-        self.materialized.insert(path.to_string(), Materialized { text, state });
+        self.materialized
+            .insert(path.to_string(), Materialized { text, state });
         Ok(())
     }
 
@@ -470,7 +569,12 @@ impl Workspace {
         for path in self.project.scan_files() {
             if !self.docs.contains_key(&path) {
                 if let Ok(text) = std::fs::read_to_string(self.project.resolve(&path)?) {
-                    self.create_document(&path, &text, &Author::external(), Some("imported from disk"))?;
+                    self.create_document(
+                        &path,
+                        &text,
+                        &Author::external(),
+                        Some("imported from disk"),
+                    )?;
                 }
             }
         }
@@ -485,12 +589,29 @@ impl Workspace {
                     // Edited outside since it was last written: merge the edit
                     // relative to what was written, so newer history is kept.
                     Some(m) => {
-                        let base = PaperDoc::from_updates(self.store.doc_updates(&path, Some(m.upto))?)?;
-                        self.materialized.insert(path.clone(), Materialized { text: base.text(), state: base.encode_state() });
-                        self.ingest_text(&path, &disk, &Author::external(), Some("edited outside LetsWritePaper"))?;
+                        let base =
+                            PaperDoc::from_updates(self.store.doc_updates(&path, Some(m.upto))?)?;
+                        self.materialized.insert(
+                            path.clone(),
+                            Materialized {
+                                text: base.text(),
+                                state: base.encode_state(),
+                            },
+                        );
+                        self.ingest_text(
+                            &path,
+                            &disk,
+                            &Author::external(),
+                            Some("edited outside LetsWritePaper"),
+                        )?;
                     }
                     None => {
-                        self.ingest_text(&path, &disk, &Author::external(), Some("edited outside LetsWritePaper"))?;
+                        self.ingest_text(
+                            &path,
+                            &disk,
+                            &Author::external(),
+                            Some("edited outside LetsWritePaper"),
+                        )?;
                     }
                 },
                 _ => self.materialize(&path)?,
@@ -519,7 +640,9 @@ impl Workspace {
             }
             return Ok(false);
         }
-        let Ok(disk) = std::fs::read_to_string(&abs) else { return Ok(false) };
+        let Ok(disk) = std::fs::read_to_string(&abs) else {
+            return Ok(false);
+        };
         if !self.docs.contains_key(&path) {
             self.create_document(&path, &disk, &Author::external(), Some("new file on disk"))?;
             return Ok(true);
@@ -534,13 +657,23 @@ impl Workspace {
             self.materialize(&path)?;
             return Ok(false);
         }
-        self.ingest_text(&path, &disk, &Author::external(), Some("edited outside LetsWritePaper"))?;
+        self.ingest_text(
+            &path,
+            &disk,
+            &Author::external(),
+            Some("edited outside LetsWritePaper"),
+        )?;
         Ok(true)
     }
 
     /// Adopt the file's current contents as an edit by `author` (used by the
     /// `paper ingest` hook so agents editing files directly get credit).
-    pub fn ingest_file(&mut self, path: &str, author: &Author, message: Option<&str>) -> Result<Option<i64>> {
+    pub fn ingest_file(
+        &mut self,
+        path: &str,
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<Option<i64>> {
         self.poll()?;
         let path = normalize_rel(path)?;
         let disk = std::fs::read_to_string(self.project.resolve(&path)?)?;
@@ -553,7 +686,13 @@ impl Workspace {
     /// Merge a new on-disk version. When the CRDT has moved on since the file
     /// was last written, the file's edits are computed against what it was
     /// written from (a shadow replica) so concurrent edits are not reverted.
-    fn ingest_text(&mut self, path: &str, disk: &str, author: &Author, message: Option<&str>) -> Result<Option<i64>> {
+    fn ingest_text(
+        &mut self,
+        path: &str,
+        disk: &str,
+        author: &Author,
+        message: Option<&str>,
+    ) -> Result<Option<i64>> {
         let before = self.doc(path)?.text();
         let update = match self.materialized.get(path) {
             Some(m) if m.text != before => {
@@ -567,7 +706,9 @@ impl Workspace {
             _ => self.doc(path)?.set_text(&author.id, disk),
         };
         match update {
-            Some(u) => self.record(path, u, author, message, &before, true).map(Some),
+            Some(u) => self
+                .record(path, u, author, message, &before, true)
+                .map(Some),
             None => Ok(None),
         }
     }
@@ -583,7 +724,12 @@ impl Workspace {
         }
         for _ in 0..40 {
             let synced = self.docs.iter().all(|(p, d)| {
-                self.project.resolve(p).ok().and_then(|a| std::fs::read_to_string(a).ok()).as_deref() == Some(d.text().as_str())
+                self.project
+                    .resolve(p)
+                    .ok()
+                    .and_then(|a| std::fs::read_to_string(a).ok())
+                    .as_deref()
+                    == Some(d.text().as_str())
             });
             if synced {
                 break;
@@ -597,15 +743,87 @@ impl Workspace {
 
     pub fn log(&self, path: Option<&str>, limit: usize) -> Result<Vec<LogEntry>> {
         let path = path.map(normalize_rel).transpose()?;
-        let metas = self.store.log(path.as_deref(), None, limit.saturating_mul(50).max(200))?;
+        let metas = self
+            .store
+            .log(path.as_deref(), None, limit.saturating_mul(50).max(200))?;
         let mut grouped = group_log(&metas);
         grouped.truncate(limit);
         Ok(grouped)
     }
 
+    /// Every edit, newest first. Each entry says what changed, not only how many characters.
+    /// `author` limits the log to one person (their author id, such as `human:ada`).
+    pub fn changes(
+        &mut self,
+        path: Option<&str>,
+        author: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Change>> {
+        let path = path.map(normalize_rel).transpose()?;
+        let metas = self.store.recent(path.as_deref(), author, limit)?;
+        let filled = self.backfill_summaries(&metas)?;
+        Ok(metas
+            .into_iter()
+            .map(|m| {
+                let summary = m
+                    .summary
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| filled.get(&m.id).cloned())
+                    .unwrap_or_else(|| "no visible text change".into());
+                Change {
+                    id: m.id,
+                    doc: m.doc,
+                    author: m.author,
+                    summary,
+                    rationale: m.message.filter(|s| !s.is_empty()),
+                    added: m.added,
+                    removed: m.removed,
+                    created_at: m.created_at,
+                }
+            })
+            .collect())
+    }
+
+    /// Older history rows have no summary. Replay each document once and store one.
+    fn backfill_summaries(
+        &mut self,
+        metas: &[crate::store::UpdateMeta],
+    ) -> Result<HashMap<i64, String>> {
+        use crate::history::summarize_change;
+        let mut need: HashMap<String, HashSet<i64>> = HashMap::new();
+        for m in metas {
+            if m.summary.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                need.entry(m.doc.clone()).or_default().insert(m.id);
+            }
+        }
+        let mut out = HashMap::new();
+        for (doc, want) in need {
+            let rows = self.store.doc_payloads(&doc)?;
+            let paper = PaperDoc::new();
+            for (id, data) in rows {
+                let before = if want.contains(&id) {
+                    Some(paper.text())
+                } else {
+                    None
+                };
+                paper.apply_update(&data)?;
+                if let Some(before) = before {
+                    let summary = summarize_change(&doc, &before, &paper.text());
+                    self.store.set_summary(id, &summary)?;
+                    out.insert(id, summary);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// What a version reference denotes.
     pub fn resolve_version(&self, v: &VersionRef) -> Result<Resolved> {
-        let cp = |c: Checkpoint| Resolved::Checkpoint { uid: c.uid, update_id: c.update_id };
+        let cp = |c: Checkpoint| Resolved::Checkpoint {
+            uid: c.uid,
+            update_id: c.update_id,
+        };
         Ok(match v {
             VersionRef::Now => Resolved::Now,
             VersionRef::Beginning => Resolved::Upto(0),
@@ -649,7 +867,12 @@ impl Workspace {
         }
     }
 
-    pub fn diff(&self, from: &VersionRef, to: &VersionRef, path: Option<&str>) -> Result<Vec<DocDiff>> {
+    pub fn diff(
+        &self,
+        from: &VersionRef,
+        to: &VersionRef,
+        path: Option<&str>,
+    ) -> Result<Vec<DocDiff>> {
         let (a, b) = (self.resolve_version(from)?, self.resolve_version(to)?);
         let paths = match path {
             Some(p) => vec![normalize_rel(p)?],
@@ -682,17 +905,40 @@ impl Workspace {
     /// Record a named version. `kind` is `checkpoint` or a milestone name
     /// (`submitted`, `rebuttal`, `camera-ready`, `arxiv`, ...). Also commits to
     /// git when the project is a repository.
-    pub fn checkpoint(&mut self, name: &str, message: &str, kind: &str, author: &Author) -> Result<Checkpoint> {
+    pub fn checkpoint(
+        &mut self,
+        name: &str,
+        message: &str,
+        kind: &str,
+        author: &Author,
+    ) -> Result<Checkpoint> {
         self.poll()?;
         let upto = self.store.max_update_id()?;
-        let previous = self.store.checkpoints()?.first().map(|c| c.update_id).unwrap_or(0);
-        let snapshots: Vec<(String, Vec<u8>)> = self.docs.iter().map(|(p, d)| (p.clone(), d.encode_state())).collect();
-        let mut cp = self.store.insert_checkpoint(name, message, kind, upto, author, &snapshots)?;
+        let previous = self
+            .store
+            .checkpoints()?
+            .first()
+            .map(|c| c.update_id)
+            .unwrap_or(0);
+        let snapshots: Vec<(String, Vec<u8>)> = self
+            .docs
+            .iter()
+            .map(|(p, d)| (p.clone(), d.encode_state()))
+            .collect();
+        let mut cp = self
+            .store
+            .insert_checkpoint(name, message, kind, upto, author, &snapshots)?;
         self.wait_for_disk()?;
         let mut contributors = self.store.authors_between(previous, upto)?;
         contributors.retain(|a| a.id != author.id);
-        let subject = if kind == "checkpoint" { name.to_string() } else { format!("[{kind}] {name}") };
-        if let Some(sha) = crate::git::commit_all(&self.project.root, &subject, message, &contributors) {
+        let subject = if kind == "checkpoint" {
+            name.to_string()
+        } else {
+            format!("[{kind}] {name}")
+        };
+        if let Some(sha) =
+            crate::git::commit_all(&self.project.root, &subject, message, &contributors)
+        {
             self.store.set_checkpoint_commit(cp.id, &sha)?;
             cp.git_commit = Some(sha);
         }
@@ -706,7 +952,12 @@ impl Workspace {
 
     /// Bring a document back to its text at a version, as a new attributed edit
     /// (history is never rewritten).
-    pub fn restore(&mut self, path: &str, version: &VersionRef, author: &Author) -> Result<Option<i64>> {
+    pub fn restore(
+        &mut self,
+        path: &str,
+        version: &VersionRef,
+        author: &Author,
+    ) -> Result<Option<i64>> {
         let resolved = self.resolve_version(version)?;
         let text = self
             .text_at(path, &resolved)?
@@ -721,21 +972,38 @@ impl Workspace {
 
     // ---- proposals (suggested edits) ---------------------------------------
 
-    pub fn propose(&mut self, path: &str, old: &str, new: &str, rationale: &str, author: &Author) -> Result<Proposal> {
+    pub fn propose(
+        &mut self,
+        path: &str,
+        old: &str,
+        new: &str,
+        rationale: &str,
+        author: &Author,
+    ) -> Result<Proposal> {
         let path = normalize_rel(path)?;
         let text = self.doc(&path)?.text();
         locate(&path, &text, old, Some(1))?;
-        let p = self.store.insert_proposal(&path, old, new, rationale, author)?;
+        let p = self
+            .store
+            .insert_proposal(&path, old, new, rationale, author)?;
         self.events.push(WorkspaceEvent::MetaChanged);
         Ok(p)
     }
 
     /// Proposals, with pending ones whose text has disappeared marked `stale`.
     pub fn proposals(&self, status: Option<&str>) -> Result<Vec<Proposal>> {
-        let mut list = self.store.proposals(if status == Some("stale") { Some("pending") } else { status })?;
+        let mut list = self.store.proposals(if status == Some("stale") {
+            Some("pending")
+        } else {
+            status
+        })?;
         for p in &mut list {
             if p.status == "pending" {
-                let found = self.docs.get(&p.doc).map(|d| d.text().contains(&p.old_text)).unwrap_or(false);
+                let found = self
+                    .docs
+                    .get(&p.doc)
+                    .map(|d| d.text().contains(&p.old_text))
+                    .unwrap_or(false);
                 if !found {
                     p.status = "stale".into();
                 }
@@ -754,7 +1022,14 @@ impl Workspace {
             return Err(Error::Invalid(format!("proposal #{id} is {}", p.status)));
         }
         let msg = format!("proposal #{id} accepted by {}: {}", by.name, p.rationale);
-        let out = self.edit(&p.doc, &p.old_text, &p.new_text, Some(1), &p.author, Some(&msg))?;
+        let out = self.edit(
+            &p.doc,
+            &p.old_text,
+            &p.new_text,
+            Some(1),
+            &p.author,
+            Some(&msg),
+        )?;
         self.store.resolve_proposal(id, "accepted", by)?;
         self.events.push(WorkspaceEvent::MetaChanged);
         Ok(out)
@@ -768,11 +1043,19 @@ impl Workspace {
 
     // ---- peer review ---------------------------------------------------------
 
-    pub fn start_review(&mut self, title: &str, persona: Option<&str>, venue: Option<&str>, reviewer: &Author) -> Result<ReviewRound> {
+    pub fn start_review(
+        &mut self,
+        title: &str,
+        persona: Option<&str>,
+        venue: Option<&str>,
+        reviewer: &Author,
+    ) -> Result<ReviewRound> {
         self.poll()?;
         let upto = self.store.max_update_id()?;
         let venue = venue.or(self.project.manifest.paper.venue.as_deref());
-        let r = self.store.insert_round(title, persona, venue, reviewer, upto)?;
+        let r = self
+            .store
+            .insert_round(title, persona, venue, reviewer, upto)?;
         self.events.push(WorkspaceEvent::MetaChanged);
         Ok(r)
     }
@@ -792,7 +1075,9 @@ impl Workspace {
         review::validate_category(category)?;
         let round = self.store.round(round_id)?;
         if round.status != "open" {
-            return Err(Error::Invalid(format!("review round #{round_id} is already finished")));
+            return Err(Error::Invalid(format!(
+                "review round #{round_id} is already finished"
+            )));
         }
         let path = normalize_rel(path)?;
         let text = self.doc(&path)?.text();
@@ -802,15 +1087,27 @@ impl Workspace {
             None => section_at(&outline(&path, &text), at).map(|s| s.title.clone()),
         };
         let hint = utf16_offset(&text, at) as i64;
-        let mut c = self
-            .store
-            .insert_comment(round_id, &path, section.as_deref(), quote, Some(hint), severity, category, body)?;
+        let mut c = self.store.insert_comment(
+            round_id,
+            &path,
+            section.as_deref(),
+            quote,
+            Some(hint),
+            severity,
+            category,
+            body,
+        )?;
         c.current_line = Some(line_of(&text, at));
         self.events.push(WorkspaceEvent::MetaChanged);
         Ok(c)
     }
 
-    pub fn finish_review(&mut self, round_id: i64, summary: &str, scores: Option<&Scores>) -> Result<ReviewRound> {
+    pub fn finish_review(
+        &mut self,
+        round_id: i64,
+        summary: &str,
+        scores: Option<&Scores>,
+    ) -> Result<ReviewRound> {
         let r = self.store.finish_round(round_id, summary, scores)?;
         self.events.push(WorkspaceEvent::MetaChanged);
         Ok(r)
@@ -826,7 +1123,10 @@ impl Workspace {
         for c in &mut list {
             c.current_line = self.docs.get(&c.doc).and_then(|d| {
                 let text = d.text();
-                let hint = c.offset_hint.map(|h| byte_offset(&text, h as u32)).unwrap_or(0);
+                let hint = c
+                    .offset_hint
+                    .map(|h| byte_offset(&text, h as u32))
+                    .unwrap_or(0);
                 text.match_indices(&c.quote)
                     .map(|(i, _)| i)
                     .min_by_key(|i| i.abs_diff(hint))
@@ -836,7 +1136,13 @@ impl Workspace {
         Ok(list)
     }
 
-    pub fn respond_to_comment(&mut self, id: i64, response: &str, status: &str, by: &Author) -> Result<ReviewComment> {
+    pub fn respond_to_comment(
+        &mut self,
+        id: i64,
+        response: &str,
+        status: &str,
+        by: &Author,
+    ) -> Result<ReviewComment> {
         review::validate_status(status)?;
         let c = self.store.respond_comment(id, response, status, by)?;
         self.events.push(WorkspaceEvent::MetaChanged);
@@ -846,28 +1152,41 @@ impl Workspace {
     pub fn response_letter(&self) -> Result<String> {
         let mut rounds = vec![];
         for r in self.store.rounds()?.into_iter().rev() {
-            let comments = self.store.comments(&CommentFilter { round_id: Some(r.id), ..Default::default() })?;
+            let comments = self.store.comments(&CommentFilter {
+                round_id: Some(r.id),
+                ..Default::default()
+            })?;
             rounds.push((r, comments));
         }
-        Ok(review::render_response_letter(&self.project.manifest.paper.title, &rounds))
+        Ok(review::render_response_letter(
+            &self.project.manifest.paper.title,
+            &rounds,
+        ))
     }
 
     // ---- skills --------------------------------------------------------------
 
     pub fn skills_for(&self, section: Option<&str>) -> Vec<AppliedSkill> {
-        self.skills.for_section(&self.project.manifest.skills, section)
+        self.skills
+            .for_section(&self.project.manifest.skills, section)
     }
 
     /// Everything an agent needs before editing a section: its text, the
     /// skills that apply, and open review feedback and suggestions on it.
-    pub fn section_context(&self, path: Option<&str>, section: Option<&str>) -> Result<SectionContext> {
+    pub fn section_context(
+        &self,
+        path: Option<&str>,
+        section: Option<&str>,
+    ) -> Result<SectionContext> {
         let (path, sec, text) = match (path, section) {
             (Some(p), Some(q)) => {
                 let (s, t) = self.section(p, q)?;
                 (normalize_rel(p)?, Some(s), t)
             }
             (None, Some(q)) => {
-                let (p, s) = self.find_section_anywhere(q).ok_or_else(|| Error::NoSection(q.into()))?;
+                let (p, s) = self
+                    .find_section_anywhere(q)
+                    .ok_or_else(|| Error::NoSection(q.into()))?;
                 let full = self.text(&p)?;
                 let t = full[s.start..s.end].to_string();
                 (p, Some(s), t)
@@ -884,7 +1203,11 @@ impl Workspace {
             .skills_for(title.as_deref())
             .into_iter()
             .map(|a| SkillInstructions {
-                instructions: self.skills.get(&a.name).map(|s| s.body.clone()).unwrap_or_default(),
+                instructions: self
+                    .skills
+                    .get(&a.name)
+                    .map(|s| s.body.clone())
+                    .unwrap_or_default(),
                 name: a.name,
                 reason: a.reason,
             })
@@ -895,7 +1218,11 @@ impl Workspace {
             _ => false,
         };
         let open_comments = self
-            .review_comments(&CommentFilter { status: Some("open".into()), doc: Some(path.clone()), ..Default::default() })?
+            .review_comments(&CommentFilter {
+                status: Some("open".into()),
+                doc: Some(path.clone()),
+                ..Default::default()
+            })?
             .into_iter()
             .filter(|c| in_section(c.current_line))
             .collect();
@@ -904,7 +1231,14 @@ impl Workspace {
             .into_iter()
             .filter(|p| p.doc == path && text.contains(&p.old_text))
             .collect();
-        Ok(SectionContext { path, section: sec, text, skills, open_comments, pending_proposals })
+        Ok(SectionContext {
+            path,
+            section: sec,
+            text,
+            skills,
+            open_comments,
+            pending_proposals,
+        })
     }
 
     /// Bind a skill to sections matching `pattern` (or globally when `None`) in paper.toml.
@@ -965,13 +1299,20 @@ fn locate(path: &str, text: &str, needle: &str, occurrence: Option<usize>) -> Re
     let hits: Vec<usize> = text.match_indices(needle).map(|(i, _)| i).collect();
     let snippet = || needle.chars().take(80).collect::<String>();
     match (hits.len(), occurrence) {
-        (0, _) => Err(Error::TextNotFound { path: path.into(), snippet: snippet() }),
+        (0, _) => Err(Error::TextNotFound {
+            path: path.into(),
+            snippet: snippet(),
+        }),
         (1, _) => Ok(hits[0]),
-        (n, None) => Err(Error::AmbiguousText { path: path.into(), count: n }),
-        (n, Some(k)) => hits
-            .get(k.saturating_sub(1))
-            .copied()
-            .ok_or_else(|| Error::Invalid(format!("occurrence {k} requested but the text occurs {n} times"))),
+        (n, None) => Err(Error::AmbiguousText {
+            path: path.into(),
+            count: n,
+        }),
+        (n, Some(k)) => hits.get(k.saturating_sub(1)).copied().ok_or_else(|| {
+            Error::Invalid(format!(
+                "occurrence {k} requested but the text occurs {n} times"
+            ))
+        }),
     }
 }
 
@@ -979,7 +1320,9 @@ fn blame_lines(runs: &[BlameRun]) -> Vec<BlameLine> {
     let mut lines: Vec<BlameLine> = vec![];
     let mut text = String::new();
     let mut counts: Vec<(Option<String>, usize)> = vec![];
-    let flush = |text: &mut String, counts: &mut Vec<(Option<String>, usize)>, lines: &mut Vec<BlameLine>| {
+    let flush = |text: &mut String,
+                 counts: &mut Vec<(Option<String>, usize)>,
+                 lines: &mut Vec<BlameLine>| {
         counts.sort_by_key(|c| std::cmp::Reverse(c.1));
         let authors: Vec<String> = counts.iter().filter_map(|(a, _)| a.clone()).collect();
         lines.push(BlameLine {
@@ -1032,13 +1375,23 @@ mod tests {
         assert!(ws.documents().contains(&"main.tex".to_string()));
         let agent = Author::agent("claude-code");
         let out = ws
-            .edit("main.tex", "\\section{Introduction}\n", "\\section{Introduction}\nLarge models are expensive.\n", None, &agent, Some("draft intro"))
+            .edit(
+                "main.tex",
+                "\\section{Introduction}\n",
+                "\\section{Introduction}\nLarge models are expensive.\n",
+                None,
+                &agent,
+                Some("draft intro"),
+            )
             .unwrap();
         assert!(out.update_id.is_some());
         let disk = std::fs::read_to_string(ws.project.root.join("main.tex")).unwrap();
         assert!(disk.contains("Large models are expensive."));
         let blame = ws.blame("main.tex").unwrap();
-        let line = blame.iter().find(|l| l.text == "Large models are expensive.").unwrap();
+        let line = blame
+            .iter()
+            .find(|l| l.text == "Large models are expensive.")
+            .unwrap();
         assert_eq!(line.author.as_deref(), Some("agent:claude-code"));
         let log = ws.log(None, 10).unwrap();
         assert_eq!(log[0].author.id, "agent:claude-code");
@@ -1048,18 +1401,33 @@ mod tests {
     #[test]
     fn two_processes_sync_through_the_log() {
         let (_dir, mut app) = setup();
-        let mut agent_proc = Workspace::open(Project::open(&app.project.root).unwrap(), Ownership::Auto).unwrap();
+        let mut agent_proc =
+            Workspace::open(Project::open(&app.project.root).unwrap(), Ownership::Auto).unwrap();
         assert!(!agent_proc.is_owner(), "app holds the owner lock");
         agent_proc
-            .edit("main.tex", "\\section{Method}\n", "\\section{Method}\nWe fine-tune.\n", None, &Author::agent("claude"), None)
+            .edit(
+                "main.tex",
+                "\\section{Method}\n",
+                "\\section{Method}\nWe fine-tune.\n",
+                None,
+                &Author::agent("claude"),
+                None,
+            )
             .unwrap();
-        app.splice("main.tex", 0, 0, "% draft\n", &Author::human("ada"), None).unwrap();
+        app.splice("main.tex", 0, 0, "% draft\n", &Author::human("ada"), None)
+            .unwrap();
         assert!(app.poll().unwrap());
         assert!(agent_proc.poll().unwrap());
-        assert_eq!(app.text("main.tex").unwrap(), agent_proc.text("main.tex").unwrap());
+        assert_eq!(
+            app.text("main.tex").unwrap(),
+            agent_proc.text("main.tex").unwrap()
+        );
         let disk = std::fs::read_to_string(app.project.root.join("main.tex")).unwrap();
         assert!(disk.starts_with("% draft\n") && disk.contains("We fine-tune."));
-        assert!(app.drain_events().iter().any(|e| matches!(e, WorkspaceEvent::DocUpdate { .. })));
+        assert!(app
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, WorkspaceEvent::DocUpdate { .. })));
     }
 
     #[test]
@@ -1067,7 +1435,9 @@ mod tests {
         let (_dir, mut ws) = setup();
         let abs = ws.project.root.join("main.tex");
         // Someone edits the file on disk...
-        let disk = std::fs::read_to_string(&abs).unwrap().replace("\\section{Method}", "\\section{Approach}");
+        let disk = std::fs::read_to_string(&abs)
+            .unwrap()
+            .replace("\\section{Method}", "\\section{Approach}");
         std::fs::write(&abs, &disk).unwrap();
         assert!(ws.check_disk("main.tex").unwrap());
         let text = ws.text("main.tex").unwrap();
@@ -1086,22 +1456,50 @@ mod tests {
         drop(owner);
         let mut writer = Workspace::open(Project::open(&root).unwrap(), Ownership::Never).unwrap();
         writer
-            .edit("main.tex", "\\section{Method}\n", "\\section{Method}\nUnmirrored sentence.\n", None, &Author::agent("claude"), None)
+            .edit(
+                "main.tex",
+                "\\section{Method}\n",
+                "\\section{Method}\nUnmirrored sentence.\n",
+                None,
+                &Author::agent("claude"),
+                None,
+            )
             .unwrap();
         drop(writer);
-        assert!(!std::fs::read_to_string(root.join("main.tex")).unwrap().contains("Unmirrored"));
+        assert!(!std::fs::read_to_string(root.join("main.tex"))
+            .unwrap()
+            .contains("Unmirrored"));
         // The next owner must bring the file up to date, not revert the edit.
         let ws = Workspace::open(Project::open(&root).unwrap(), Ownership::Auto).unwrap();
-        assert!(ws.text("main.tex").unwrap().contains("Unmirrored sentence."));
-        assert!(std::fs::read_to_string(root.join("main.tex")).unwrap().contains("Unmirrored sentence."));
-        assert_eq!(ws.log(Some("main.tex"), 1).unwrap()[0].author.id, "agent:claude");
+        assert!(ws
+            .text("main.tex")
+            .unwrap()
+            .contains("Unmirrored sentence."));
+        assert!(std::fs::read_to_string(root.join("main.tex"))
+            .unwrap()
+            .contains("Unmirrored sentence."));
+        assert_eq!(
+            ws.log(Some("main.tex"), 1).unwrap()[0].author.id,
+            "agent:claude"
+        );
         drop(ws);
 
         // Now a real outside edit plus an unmirrored history edit: both survive.
         let mut writer = Workspace::open(Project::open(&root).unwrap(), Ownership::Never).unwrap();
-        writer.edit("main.tex", "Unmirrored sentence.", "Unmirrored sentence, revised.", None, &Author::agent("claude"), None).unwrap();
+        writer
+            .edit(
+                "main.tex",
+                "Unmirrored sentence.",
+                "Unmirrored sentence, revised.",
+                None,
+                &Author::agent("claude"),
+                None,
+            )
+            .unwrap();
         drop(writer);
-        let disk = std::fs::read_to_string(root.join("main.tex")).unwrap().replace("\\section{Experiments}", "\\section{Evaluation}");
+        let disk = std::fs::read_to_string(root.join("main.tex"))
+            .unwrap()
+            .replace("\\section{Experiments}", "\\section{Evaluation}");
         std::fs::write(root.join("main.tex"), disk).unwrap();
         let ws = Workspace::open(Project::open(&root).unwrap(), Ownership::Auto).unwrap();
         let text = ws.text("main.tex").unwrap();
@@ -1113,15 +1511,87 @@ mod tests {
     fn checkpoints_diffs_and_restore() {
         let (_dir, mut ws) = setup();
         let me = Author::human("ada");
-        ws.checkpoint("draft-1", "first draft", "checkpoint", &me).unwrap();
-        ws.edit("main.tex", "\\section{Experiments}\n", "\\section{Experiments}\nAccuracy improves by 3 points.\n", None, &me, None)
+        ws.checkpoint("draft-1", "first draft", "checkpoint", &me)
             .unwrap();
-        let diffs = ws.diff(&VersionRef::parse("draft-1"), &VersionRef::Now, None).unwrap();
+        ws.edit(
+            "main.tex",
+            "\\section{Experiments}\n",
+            "\\section{Experiments}\nAccuracy improves by 3 points.\n",
+            None,
+            &me,
+            None,
+        )
+        .unwrap();
+        let diffs = ws
+            .diff(&VersionRef::parse("draft-1"), &VersionRef::Now, None)
+            .unwrap();
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].sections[0].section.as_deref(), Some("Experiments"));
-        ws.restore("main.tex", &VersionRef::parse("draft-1"), &me).unwrap();
+        ws.restore("main.tex", &VersionRef::parse("draft-1"), &me)
+            .unwrap();
         assert!(!ws.text("main.tex").unwrap().contains("Accuracy improves"));
         assert!(ws.checkpoint("draft-1", "dup", "checkpoint", &me).is_err());
+    }
+
+    #[test]
+    fn every_user_edit_is_logged_with_a_summary() {
+        let (_dir, mut ws) = setup();
+        let me = Author::human("ada");
+        ws.edit(
+            "main.tex",
+            "\\section{Experiments}\n",
+            "\\section{Experiments}\nAccuracy improves by 3 points.\n",
+            None,
+            &me,
+            None,
+        )
+        .unwrap();
+        ws.edit(
+            "main.tex",
+            "\\section{Conclusion}\n",
+            "\\section{Conclusion}\nWe stop here.\n",
+            None,
+            &me,
+            Some("wrap up"),
+        )
+        .unwrap();
+        let changes = ws.changes(Some("main.tex"), Some(&me.id), 10).unwrap();
+        assert!(changes.len() >= 2, "{changes:?}");
+        let experiments = changes
+            .iter()
+            .find(|c| c.summary.contains("Experiments"))
+            .unwrap();
+        assert!(
+            experiments.summary.contains("Accuracy improves"),
+            "{}",
+            experiments.summary
+        );
+        assert!(experiments.rationale.is_none());
+        let conclusion = changes
+            .iter()
+            .find(|c| c.summary.contains("Conclusion"))
+            .unwrap();
+        assert_eq!(conclusion.rationale.as_deref(), Some("wrap up"));
+        assert_ne!(experiments.id, conclusion.id);
+
+        // History written before summaries existed is described on read, then remembered.
+        let db = ws.project.db_path();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE updates SET summary = NULL WHERE author_id = ?1",
+            [&me.id],
+        )
+        .unwrap();
+        drop(conn);
+        let again = ws.changes(Some("main.tex"), Some(&me.id), 10).unwrap();
+        assert!(
+            again
+                .iter()
+                .any(|c| c.summary.contains("Accuracy improves")),
+            "{again:?}"
+        );
+        let kept = ws.changes(Some("main.tex"), Some(&me.id), 10).unwrap();
+        assert!(kept.iter().any(|c| c.summary.contains("Accuracy improves")));
     }
 
     #[test]
@@ -1129,25 +1599,77 @@ mod tests {
         let (_dir, mut ws) = setup();
         let agent = Author::agent("claude");
         let me = Author::human("ada");
-        let p = ws.propose("main.tex", "\\section{Method}", "\\section{Our Method}", "clearer", &agent).unwrap();
+        let p = ws
+            .propose(
+                "main.tex",
+                "\\section{Method}",
+                "\\section{Our Method}",
+                "clearer",
+                &agent,
+            )
+            .unwrap();
         assert_eq!(ws.proposals(Some("pending")).unwrap().len(), 1);
         ws.accept_proposal(p.id, &me).unwrap();
         assert!(ws.text("main.tex").unwrap().contains("Our Method"));
         assert_eq!(ws.log(None, 1).unwrap()[0].author.id, "agent:claude");
 
-        let round = ws.start_review("Mock review", Some("methods-skeptic"), Some("NeurIPS"), &agent).unwrap();
+        let round = ws
+            .start_review(
+                "Mock review",
+                Some("methods-skeptic"),
+                Some("NeurIPS"),
+                &agent,
+            )
+            .unwrap();
         let c = ws
-            .add_review_comment(round.id, "main.tex", "\\section{Our Method}", "major", "soundness", "Method is empty.", None)
+            .add_review_comment(
+                round.id,
+                "main.tex",
+                "\\section{Our Method}",
+                "major",
+                "soundness",
+                "Method is empty.",
+                None,
+            )
             .unwrap();
         assert_eq!(c.section.as_deref(), Some("Our Method"));
-        assert!(ws.add_review_comment(round.id, "main.tex", "nope", "major", "soundness", "x", None).is_err());
-        assert!(ws.add_review_comment(round.id, "main.tex", "\\section{Our Method}", "fatal", "soundness", "x", None).is_err());
+        assert!(ws
+            .add_review_comment(
+                round.id,
+                "main.tex",
+                "nope",
+                "major",
+                "soundness",
+                "x",
+                None
+            )
+            .is_err());
+        assert!(ws
+            .add_review_comment(
+                round.id,
+                "main.tex",
+                "\\section{Our Method}",
+                "fatal",
+                "soundness",
+                "x",
+                None
+            )
+            .is_err());
         let ctx = ws.section_context(None, Some("our method")).unwrap();
         assert_eq!(ctx.open_comments.len(), 1);
         assert!(ctx.skills.iter().any(|s| s.name == "paper-methods"));
         assert!(ctx.skills.iter().any(|s| s.name == "latex-hygiene"));
-        ws.finish_review(round.id, "Promising but thin.", Some(&Scores { overall: Some(4), ..Default::default() })).unwrap();
-        ws.respond_to_comment(c.id, "Added a full method section.", "addressed", &me).unwrap();
+        ws.finish_review(
+            round.id,
+            "Promising but thin.",
+            Some(&Scores {
+                overall: Some(4),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        ws.respond_to_comment(c.id, "Added a full method section.", "addressed", &me)
+            .unwrap();
         let letter = ws.response_letter().unwrap();
         assert!(letter.contains("Added a full method section."));
     }
@@ -1159,6 +1681,9 @@ mod tests {
         let reopened = Project::open(&ws.project.root).unwrap();
         assert_eq!(reopened.manifest.skills.sections["related*"], ["my-style"]);
         ws.unbind_skill(None, "paper-introduction").unwrap();
-        assert!(!ws.skills_for(Some("Introduction")).iter().any(|s| s.name == "paper-introduction"));
+        assert!(!ws
+            .skills_for(Some("Introduction"))
+            .iter()
+            .any(|s| s.name == "paper-introduction"));
     }
 }

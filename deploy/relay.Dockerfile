@@ -2,7 +2,7 @@
 # Build from the repository root:
 #   docker build -f deploy/relay.Dockerfile -t paper-relay .
 #   docker run -p 8787:8787 -v paper-relay:/data -e PAPER_RELAY_SECRET=change-me paper-relay
-FROM rust:1.89-bookworm AS build
+FROM rust:1.95-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release -p paper-cli

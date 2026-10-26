@@ -75,12 +75,17 @@ impl Author {
         }
     }
 
-    /// The local human user: `$PAPER_AUTHOR`, then git's `user.name`, then the OS user.
+    /// The local human user: `$PAPER_AUTHOR`, then the name saved by the setup
+    /// wizard, then git's `user.name`, then the OS user.
     pub fn local_user() -> Self {
         if let Ok(spec) = std::env::var("PAPER_AUTHOR") {
             if !spec.trim().is_empty() {
                 return Self::parse(spec.trim());
             }
+        }
+        let saved = crate::user_config::load().name;
+        if !saved.trim().is_empty() {
+            return Self::human(saved.trim());
         }
         let git_name = std::process::Command::new("git")
             .args(["config", "user.name"])
@@ -89,12 +94,26 @@ impl Author {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
-        let name = git_name
-            .or_else(|| std::env::var("USER").ok())
-            .or_else(|| std::env::var("USERNAME").ok())
-            .unwrap_or_else(|| "author".into());
-        Self::human(&name)
+        let os_user = std::env::var("USER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("USERNAME").ok().filter(|s| !s.is_empty()));
+        Self::human(&fallback_name(
+            None,
+            git_name.as_deref(),
+            os_user.as_deref(),
+        ))
     }
+}
+
+/// First non-empty candidate, otherwise `"author"`.
+fn fallback_name(saved: Option<&str>, git: Option<&str>, os_user: Option<&str>) -> String {
+    for candidate in [saved, git, os_user] {
+        if let Some(name) = candidate.map(str::trim).filter(|s| !s.is_empty()) {
+            return name.to_string();
+        }
+    }
+    "author".into()
 }
 
 pub fn slug(name: &str) -> String {
@@ -124,5 +143,13 @@ mod tests {
         assert_eq!(a.id, "agent:claude-code");
         assert_eq!(a.kind, AuthorKind::Agent);
         assert_eq!(Author::parse("Ada Lovelace").id, "human:ada-lovelace");
+    }
+
+    #[test]
+    fn fallback_name_prefers_the_saved_profile() {
+        assert_eq!(fallback_name(Some("Ada"), Some("Git"), Some("os")), "Ada");
+        assert_eq!(fallback_name(Some("  "), Some("Git"), Some("os")), "Git");
+        assert_eq!(fallback_name(None, None, Some("os")), "os");
+        assert_eq!(fallback_name(None, None, None), "author");
     }
 }

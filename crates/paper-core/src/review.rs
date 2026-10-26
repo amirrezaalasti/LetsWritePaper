@@ -102,16 +102,23 @@ fn check(s: &str, allowed: &[&str], what: &str) -> crate::Result<()> {
     if allowed.contains(&s) {
         Ok(())
     } else {
-        Err(crate::Error::Invalid(format!("invalid {what} {s:?}; expected one of {allowed:?}")))
+        Err(crate::Error::Invalid(format!(
+            "invalid {what} {s:?}; expected one of {allowed:?}"
+        )))
     }
 }
 
 /// Render rounds and their comments as a Markdown rebuttal / response letter.
 pub fn render_response_letter(title: &str, rounds: &[(ReviewRound, Vec<ReviewComment>)]) -> String {
     let mut out = format!("# Response to reviewers — {title}\n\n");
-    out.push_str("We thank the reviewers for their feedback. Responses are given point by point below.\n");
+    out.push_str(
+        "We thank the reviewers for their feedback. Responses are given point by point below.\n",
+    );
     for (round, comments) in rounds {
-        let who = round.persona.clone().unwrap_or_else(|| round.reviewer.name.clone());
+        let who = round
+            .persona
+            .clone()
+            .unwrap_or_else(|| round.reviewer.name.clone());
         out.push_str(&format!("\n## {} ({})\n", round.title, who));
         if let Some(summary) = &round.summary {
             out.push_str(&format!("\n> {}\n", summary.replace('\n', "\n> ")));
@@ -119,7 +126,12 @@ pub fn render_response_letter(title: &str, rounds: &[(ReviewRound, Vec<ReviewCom
         for c in comments {
             out.push_str(&format!(
                 "\n### R{}.{} [{} · {}] — {}\n\n> {}\n\n",
-                round.id, c.id, c.severity, c.category, c.status, c.body.replace('\n', "\n> ")
+                round.id,
+                c.id,
+                c.severity,
+                c.category,
+                c.status,
+                c.body.replace('\n', "\n> ")
             ));
             match &c.response {
                 Some(r) => out.push_str(&format!("**Response.** {r}\n")),

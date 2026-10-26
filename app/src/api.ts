@@ -47,6 +47,17 @@ export interface LogEntry {
   ended_at: number;
 }
 
+export interface Change {
+  id: number;
+  doc: string;
+  author: Author;
+  summary: string;
+  rationale: string | null;
+  added: number;
+  removed: number;
+  created_at: number;
+}
+
 export interface Segment {
   kind: "equal" | "insert" | "delete";
   text: string;
@@ -183,6 +194,23 @@ export interface ShareInfo {
   status: SyncStatus | null;
 }
 
+export interface SetupStatus {
+  name: string;
+  setup_done: boolean;
+  /** Typst preview is compiled into the desktop app. */
+  typst: boolean;
+  /** `tectonic`, `latexmk`, or absent. */
+  latex: string | null;
+  latex_path: string | null;
+  claude_installed: boolean;
+  claude_version: string | null;
+  codex_installed: boolean;
+  codex_version: string | null;
+  gemini_installed: boolean;
+  gemini_version: string | null;
+  tectonic_command: string;
+}
+
 export interface ClaudeStatus {
   installed: boolean;
   path: string | null;
@@ -190,11 +218,30 @@ export interface ClaudeStatus {
   install_command: string;
 }
 
+export interface ClaudeAuthInfo {
+  logged_in: boolean;
+  /** `claudeai`, `console`, `bedrock`, `vertex`, or `foundry`. */
+  provider: string;
+  detail: string;
+}
+
 export interface ClaudeSession {
   id: string;
   title: string;
   created_at: number;
   updated_at: number;
+  /** `claude`, `chatgpt`, or `gemini`. */
+  assistant?: string;
+}
+
+export interface ClaudePermissionReply {
+  request_id: string;
+  behavior: "allow" | "deny";
+  message?: string;
+  tool_use_id?: string;
+  updated_input?: unknown;
+  updated_permissions?: unknown;
+  decision?: "user_temporary" | "user_permanent" | "user_reject";
 }
 
 export interface EditorContext {
@@ -213,12 +260,14 @@ export const api = {
   agentCommand: () => invoke<string>("agent_command"),
 
   docState: (path: string) => invoke<string>("doc_state", { path }),
+  docText: (path: string) => invoke<string>("doc_text", { path }),
   pushUpdate: (path: string, update: string) => invoke<number>("push_update", { path, update }),
   createDocument: (path: string, content: string) => invoke<void>("create_document", { path, content }),
   deleteDocument: (path: string) => invoke<void>("delete_document", { path }),
   outline: (path: string) => invoke<Section[]>("outline", { path }),
 
   history: (path?: string, limit?: number) => invoke<LogEntry[]>("history", { path, limit }),
+  changes: (path?: string, author?: string, limit?: number) => invoke<Change[]>("changes", { path, author, limit }),
   diff: (from: string, to: string, path?: string) => invoke<DocDiff[]>("diff", { from, to, path }),
   textAt: (path: string, version: string) => invoke<string | null>("text_at", { path, version }),
   blame: (path: string) =>
@@ -262,16 +311,51 @@ export const api = {
   stopSharing: () => invoke<void>("stop_sharing"),
   joinProject: (link: string, dir: string) => invoke<ProjectInfo>("join_project", { link, dir }),
 
-  claudeStatus: () => invoke<ClaudeStatus>("claude_status"),
-  claudeInstall: () => invoke<ClaudeStatus>("claude_install"),
+  setupStatus: () => invoke<SetupStatus>("setup_status"),
+  setupSave: (name: string, setup_done: boolean) => invoke<SetupStatus>("setup_save", { name, setup_done }),
+  installTectonic: () => invoke<SetupStatus>("install_tectonic"),
+
+  claudeStatus: (assistant?: string) => invoke<ClaudeStatus>("claude_status", { assistant }),
+  claudeAuth: (assistant?: string) => invoke<ClaudeAuthInfo>("claude_auth", { assistant }),
+  assistantStoreKey: (assistant: string, api_key: string) =>
+    invoke<void>("assistant_store_key", { assistant, api_key }),
+  claudeInstall: (assistant?: string) => invoke<ClaudeStatus>("claude_install", { assistant }),
   claudeSessions: () => invoke<ClaudeSession[]>("claude_sessions"),
-  claudeStart: (chat_id: string, mode: "paper" | "edits", resume?: string, model?: string) =>
-    invoke<void>("claude_start", { chat_id, resume, mode, model }),
+  claudeStart: (
+    chat_id: string,
+    mode: "paper" | "edits",
+    resume?: string,
+    model?: string,
+    provider?: string,
+    foundry_resource?: string,
+    foundry_api_key?: string,
+    assistant?: string,
+    api_key?: string,
+  ) =>
+    invoke<void>("claude_start", {
+      chat_id,
+      resume,
+      mode,
+      model,
+      provider,
+      foundry_resource,
+      foundry_api_key,
+      assistant,
+      api_key,
+    }),
   claudeSend: (chat_id: string, text: string, context?: EditorContext) =>
     invoke<void>("claude_send", { chat_id, text, context }),
+  claudePermission: (chat_id: string, reply: ClaudePermissionReply) =>
+    invoke<void>("claude_permission", { chat_id, reply }),
   claudeStop: (chat_id: string) => invoke<string | null>("claude_stop", { chat_id }),
-  claudeTerminal: (action: "login" | "resume" | "remote", session?: string, chat_id?: string) =>
-    invoke<string>("claude_terminal", { action, session, chat_id }),
+  claudeTerminal: (
+    action: "login" | "resume" | "remote",
+    session?: string,
+    chat_id?: string,
+    provider?: string,
+    foundry_resource?: string,
+    assistant?: string,
+  ) => invoke<string>("claude_terminal", { action, session, chat_id, provider, foundry_resource, assistant }),
 
   compile: (main?: string) => invoke<CompileResult>("compile", { main }),
   exportPdf: () => invoke<string>("export_pdf"),
@@ -288,6 +372,7 @@ export const events = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     listen<{ chat_id: string; event: any }>("claude://event", (e) => cb(e.payload)),
   onInstallLog: (cb: (line: string) => void) => listen<string>("claude://install-log", (e) => cb(e.payload)),
+  onSetupLog: (cb: (line: string) => void) => listen<string>("setup://install-log", (e) => cb(e.payload)),
 };
 
 export function b64ToBytes(b64: string): Uint8Array {

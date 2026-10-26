@@ -19,6 +19,7 @@ pub mod skills;
 pub mod store;
 pub mod sync;
 pub mod textdiff;
+pub mod user_config;
 pub mod workspace;
 
 pub use author::{Author, AuthorKind};
@@ -38,6 +39,9 @@ pub fn now_ms() -> i64 {
 pub fn format_ms(ms: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000)
         .ok()
-        .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok())
+        .and_then(|t| {
+            t.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
         .unwrap_or_else(|| ms.to_string())
 }

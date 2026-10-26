@@ -19,7 +19,12 @@ fn main() {
     for name in names {
         let path = dir.join(&name).join("SKILL.md").canonicalize().unwrap();
         println!("cargo:rerun-if-changed={}", path.display());
-        writeln!(out, "    ({name:?}, include_str!({:?})),", path.display().to_string()).unwrap();
+        writeln!(
+            out,
+            "    ({name:?}, include_str!({:?})),",
+            path.display().to_string()
+        )
+        .unwrap();
     }
     out.push_str("];\n");
     let dest = Path::new(&std::env::var("OUT_DIR").unwrap()).join("bundled_skills.rs");

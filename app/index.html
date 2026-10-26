@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LetsWritePaper</title>
+    <script>
+      (function () {
+        var choice = "system";
+        try {
+          choice = localStorage.getItem("lwp.theme") || "system";
+        } catch (e) {}
+        var named = { system: 1, ink: 1, paper: 1, sepia: 1, fog: 1, midnight: 1, grove: 1 };
+        if (!named[choice]) choice = "system";
+        var theme = choice === "system" ? (matchMedia("(prefers-color-scheme: light)").matches ? "paper" : "ink") : choice;
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.themeChoice = choice;
+      })();
+    </script>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>

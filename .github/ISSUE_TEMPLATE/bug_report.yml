@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in the app, CLI, or relay does not work as described.
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Desktop app
+        - Setup or install
+        - LaTeX or Typst preview
+        - Claude panel
+        - Sync or relay
+        - CLI or MCP
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: App version, git commit, or "built from source".
+      placeholder: "0.1.0"
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - macOS
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant output. Leave out paper text, share links, and account tokens.
+      render: shell

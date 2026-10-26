@@ -1,0 +1,160 @@
+import Link from "next/link";
+import { InstallPanel } from "@/components/install-panel";
+import { Manuscript } from "@/components/manuscript";
+
+const features = [
+  {
+    number: "01",
+    title: "Live co-editing",
+    body: "Every document is a CRDT. The editor, agents, other tools writing the files, and your other devices merge without a conflict to resolve.",
+  },
+  {
+    number: "02",
+    title: "A changelog for the paper",
+    body: "Each edit is its own entry: who made it, when, and a short description. Diffs are word-level and grouped by section. Blame works per character. A restore is recorded as a new edit, so nothing is thrown away.",
+  },
+  {
+    number: "03",
+    title: "Checkpoints",
+    body: "Name a moment: submitted, rebuttal, camera-ready, or arxiv. That checkpoint is also a git commit, and it credits every human and agent who contributed.",
+  },
+  {
+    number: "04",
+    title: "Agents as co-authors",
+    body: "A built-in MCP server offers 23 paper-aware tools, from section context and exact edits to compile and review. Claude Code, Claude in VS Code or Cursor, and any other MCP client can use them. The edit shows up live, under the agent’s name.",
+  },
+  {
+    number: "05",
+    title: "Skills for a section",
+    body: "A skill is a SKILL.md file of writing or review instructions, bound to sections. Thirteen ship with the app, skills you already keep for Claude are picked up, and a paper can carry its own.",
+  },
+  {
+    number: "06",
+    title: "Review that stays put",
+    body: "Rounds can come from you or from a reviewer persona. Comments carry a severity and a category, and they stay anchored to the quoted text as it changes. A round exports as a Markdown response-to-reviewers letter.",
+  },
+];
+
+const steps = [
+  {
+    title: "Someone edits",
+    body: "You, in the editor, or an agent through the paper tools or the Claude panel. The panel already knows the open file, the section, and the selection.",
+  },
+  {
+    title: "The change is stored",
+    body: "The entry keeps the author, the time, and a short description. A stretch of edits by the same author can be read as one session.",
+  },
+  {
+    title: "You can look back",
+    body: "Diff two moments by section, blame a line down to the character, or open the file as it was at a checkpoint.",
+  },
+  {
+    title: "You mark the moment",
+    body: "A named checkpoint becomes a git commit. The people and agents who wrote the paper are on that commit.",
+  },
+];
+
+export default function HomePage() {
+  return (
+    <main>
+      <section className="mx-auto grid w-full max-w-6xl items-center gap-12 px-5 py-16 lg:grid-cols-[1.15fr_0.85fr] lg:py-24">
+        <div>
+          <p className="text-sm tracking-wide text-muted uppercase">Version 0.1 · LaTeX and Typst</p>
+          <h1 className="mt-4 max-w-xl font-serif text-5xl leading-[1.05] tracking-tight text-ink sm:text-6xl">
+            Every edit keeps its <em>author.</em>
+          </h1>
+          <p className="mt-6 max-w-xl text-lg leading-8 text-muted">
+            LetsWritePaper is an editor for academic papers. Humans and agents work on the same document. The app
+            records who changed it, when, and why, then lets you diff a section, review it, and continue on another
+            computer.
+          </p>
+          <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+            <Link
+              href="/download"
+              className="inline-flex h-12 items-center justify-center rounded-full bg-accent px-6 font-medium text-white hover:bg-accent-ink"
+            >
+              Download the app
+            </Link>
+            <a
+              href="#product"
+              className="inline-flex h-12 items-center justify-center rounded-full border border-line-strong bg-sheet px-6 font-medium hover:border-ink"
+            >
+              What it records
+            </a>
+          </div>
+        </div>
+        <Manuscript />
+      </section>
+
+      <section id="product" className="border-t border-line">
+        <div className="mx-auto w-full max-w-6xl px-5 py-16 lg:py-24">
+          <h2 className="font-serif text-4xl tracking-tight">What the app is for</h2>
+          <p className="mt-4 max-w-2xl text-lg leading-8 text-muted">
+            The desktop app is what you install. The <span className="font-mono text-base text-ink">paper</span> command
+            does the same work from a terminal. Typst preview is built in. LaTeX preview uses tectonic, or latexmk if
+            you already have a TeX distribution.
+          </p>
+          <ol className="mt-12 grid gap-x-12 gap-y-10 md:grid-cols-2">
+            {features.map((feature) => (
+              <li key={feature.number}>
+                <p className="font-mono text-xs text-muted">{feature.number}</p>
+                <h3 className="mt-2 font-serif text-2xl tracking-tight">{feature.title}</h3>
+                <p className="mt-2 max-w-prose leading-7 text-muted">{feature.body}</p>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </section>
+
+      <section className="border-t border-line bg-sheet/60">
+        <div className="mx-auto w-full max-w-6xl px-5 py-16 lg:py-24">
+          <h2 className="font-serif text-4xl tracking-tight">What happens to an edit</h2>
+          <ol className="mt-10 grid gap-8 md:grid-cols-2">
+            {steps.map((step, index) => (
+              <li key={step.title} className="border-t border-line pt-4">
+                <p className="font-mono text-xs text-muted">0{index + 1}</p>
+                <h3 className="mt-2 font-serif text-2xl tracking-tight">{step.title}</h3>
+                <p className="mt-2 leading-7 text-muted">{step.body}</p>
+              </li>
+            ))}
+          </ol>
+          <div className="mt-12 grid gap-8 border-t border-line pt-8 md:grid-cols-2">
+            <div>
+              <h3 className="font-serif text-2xl tracking-tight">Preview</h3>
+              <p className="mt-2 leading-7 text-muted">
+                Typst compiles in the app, usually in milliseconds. LaTeX compiles with tectonic or latexmk, and the
+                diagnostics are clickable. The first launch can install tectonic for you.
+              </p>
+            </div>
+            <div>
+              <h3 className="font-serif text-2xl tracking-tight">Another computer</h3>
+              <p className="mt-2 leading-7 text-muted">
+                Share a paper on the local network, or through a relay. The other device joins from a link and keeps a
+                full copy that works offline, then merges when it reconnects. The link is the access token, so treat it
+                like a password.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="download" className="border-t border-line">
+        <div className="mx-auto w-full max-w-6xl px-5 py-16 lg:py-24">
+          <h2 className="font-serif text-4xl tracking-tight">Download</h2>
+          <p className="mt-4 max-w-2xl text-lg leading-8 text-muted">
+            People install LetsWritePaper from the GitHub release. Cloning the repository is only for building it
+            yourself.
+          </p>
+          <div className="mt-8">
+            <InstallPanel />
+          </div>
+          <p className="mt-8 text-sm">
+            <Link href="/download" className="text-accent-ink underline decoration-line underline-offset-4 hover:text-ink">
+              First launch, and building it yourself
+            </Link>
+          </p>
+        </div>
+      </section>
+    </main>
+  );
+}

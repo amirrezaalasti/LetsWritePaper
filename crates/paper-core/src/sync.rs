@@ -154,17 +154,30 @@ pub struct ImportOutcome {
 }
 
 fn author_cols(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<AuthorCols> {
-    Ok(AuthorCols { id: row.get(idx)?, kind: row.get(idx + 1)?, name: row.get(idx + 2)? })
+    Ok(AuthorCols {
+        id: row.get(idx)?,
+        kind: row.get(idx + 1)?,
+        name: row.get(idx + 2)?,
+    })
 }
 
 impl Store {
     pub fn max_seq(&self) -> Result<i64> {
-        Ok(self.conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM changelog", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) FROM changelog", [], |r| {
+                r.get(0)
+            })?)
     }
 
     /// Records changed after `after`, skipping changes that came from
     /// `exclude_origin` (so a device is not sent its own changes back).
-    pub fn export_changes(&self, after: i64, exclude_origin: Option<&str>, limit: usize) -> Result<ChangeBatch> {
+    pub fn export_changes(
+        &self,
+        after: i64,
+        exclude_origin: Option<&str>,
+        limit: usize,
+    ) -> Result<ChangeBatch> {
         let max = self.max_seq()?;
         let mut stmt = self.conn.prepare(
             // Each key's latest change decides: skip it if that came from `exclude_origin`.
@@ -175,11 +188,17 @@ impl Store {
              ORDER BY seq LIMIT ?4",
         )?;
         let keys: Vec<(String, String, i64)> = stmt
-            .query_map(params![after, max, exclude_origin, limit as i64 + 1], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map(params![after, max, exclude_origin, limit as i64 + 1], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let more = keys.len() > limit;
         let keys = &keys[..keys.len().min(limit)];
-        let seq = if more { keys.last().map(|k| k.2).unwrap_or(max) } else { max };
+        let seq = if more {
+            keys.last().map(|k| k.2).unwrap_or(max)
+        } else {
+            max
+        };
         let mut records = vec![];
         for (kind, key, _) in keys {
             if let Some(r) = self.record(kind, key)? {
@@ -360,7 +379,11 @@ impl Store {
     fn local_updated_at(&self, table: &str, key_col: &str, key: &str) -> Result<Option<i64>> {
         Ok(self
             .conn
-            .query_row(&format!("SELECT updated_at FROM {table} WHERE {key_col} = ?1"), params![key], |r| r.get(0))
+            .query_row(
+                &format!("SELECT updated_at FROM {table} WHERE {key_col} = ?1"),
+                params![key],
+                |r| r.get(0),
+            )
             .optional()?)
     }
 
@@ -492,7 +515,9 @@ pub fn shared_files_on_disk(project: &Project) -> Vec<String> {
     let mut out = vec![crate::project::MANIFEST.to_string()];
     let mut stack = vec![project.skills_dir()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -518,7 +543,11 @@ pub fn capture_files(store: &Store, project: &Project) -> Result<usize> {
         }
     }
     for (path, _, deleted) in store.files()? {
-        if !deleted && path.starts_with(".paper/skills/") && !on_disk.contains(&path) && store.put_file(&path, "", true)? {
+        if !deleted
+            && path.starts_with(".paper/skills/")
+            && !on_disk.contains(&path)
+            && store.put_file(&path, "", true)?
+        {
             changed += 1;
         }
     }
@@ -534,7 +563,9 @@ pub fn apply_files(store: &Store, root: &std::path::Path, paths: &[String]) -> R
             Some((_, true, _)) => {
                 let _ = std::fs::remove_file(&abs);
             }
-            Some((content, false, _)) if std::fs::read_to_string(&abs).ok().as_deref() != Some(content.as_str()) => {
+            Some((content, false, _))
+                if std::fs::read_to_string(&abs).ok().as_deref() != Some(content.as_str()) =>
+            {
                 if let Some(parent) = abs.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -567,9 +598,28 @@ mod tests {
         capture_files(a.store(), &a.project).unwrap();
         let me = Author::human("ada");
         let agent = Author::agent("claude-code");
-        a.edit("main.typ", "= Method <sec:method>\n", "= Method <sec:method>\nWe prune heads.\n", None, &agent, Some("m")).unwrap();
-        let round = a.start_review("R1", Some("methods-skeptic"), None, &agent).unwrap();
-        a.add_review_comment(round.id, "main.typ", "We prune heads.", "major", "soundness", "Which heads?", None).unwrap();
+        a.edit(
+            "main.typ",
+            "= Method <sec:method>\n",
+            "= Method <sec:method>\nWe prune heads.\n",
+            None,
+            &agent,
+            Some("m"),
+        )
+        .unwrap();
+        let round = a
+            .start_review("R1", Some("methods-skeptic"), None, &agent)
+            .unwrap();
+        a.add_review_comment(
+            round.id,
+            "main.typ",
+            "We prune heads.",
+            "major",
+            "soundness",
+            "Which heads?",
+            None,
+        )
+        .unwrap();
         a.checkpoint("v1", "first", "checkpoint", &me).unwrap();
 
         // Device B: empty store, pulls everything from A.
@@ -578,16 +628,26 @@ mod tests {
         let b_store = Store::open(&b_dir.path().join(".paper/history.db")).unwrap();
         let batch = a.store().export_changes(0, None, 10_000).unwrap();
         assert!(!batch.more);
-        let out = b_store.import_records(batch.records.clone(), "device-a").unwrap();
+        let out = b_store
+            .import_records(batch.records.clone(), "device-a")
+            .unwrap();
         assert!(out.files.contains(&"paper.toml".to_string()));
         apply_files(&b_store, b_dir.path(), &out.files).unwrap();
         drop(b_store);
         let mut b = Workspace::open(Project::open(b_dir.path()).unwrap(), Ownership::Auto).unwrap();
         assert_eq!(b.text("main.typ").unwrap(), a.text("main.typ").unwrap());
-        assert!(std::fs::read_to_string(b_dir.path().join("main.typ")).unwrap().contains("We prune heads."));
+        assert!(std::fs::read_to_string(b_dir.path().join("main.typ"))
+            .unwrap()
+            .contains("We prune heads."));
         assert_eq!(b.review_comments(&Default::default()).unwrap().len(), 1);
         // Checkpoint snapshot reconstructs on the other device.
-        let diff = b.diff(&crate::history::VersionRef::parse("v1"), &crate::history::VersionRef::Now, None).unwrap();
+        let diff = b
+            .diff(
+                &crate::history::VersionRef::parse("v1"),
+                &crate::history::VersionRef::Now,
+                None,
+            )
+            .unwrap();
         assert!(diff.is_empty(), "{diff:?}");
         // Re-importing is a no-op.
         let again = b.store().import_records(batch.records, "device-a").unwrap();
@@ -596,17 +656,38 @@ mod tests {
         // B responds and edits; A pulls B's changes (excluding what A sent).
         let cursor = b.store().max_seq().unwrap();
         let c = b.review_comments(&Default::default()).unwrap()[0].clone();
-        b.respond_to_comment(c.id, "Clarified.", "addressed", &me).unwrap();
-        b.edit("main.typ", "We prune heads.", "We prune the 20% least important heads.", None, &me, None).unwrap();
-        let back = b.store().export_changes(cursor, Some("device-a"), 10_000).unwrap();
+        b.respond_to_comment(c.id, "Clarified.", "addressed", &me)
+            .unwrap();
+        b.edit(
+            "main.typ",
+            "We prune heads.",
+            "We prune the 20% least important heads.",
+            None,
+            &me,
+            None,
+        )
+        .unwrap();
+        let back = b
+            .store()
+            .export_changes(cursor, Some("device-a"), 10_000)
+            .unwrap();
         // The sync client always uses its own connection, like another process.
         let a_sync = Store::open(&a.project.db_path()).unwrap();
         a_sync.import_records(back.records, "device-b").unwrap();
         a.poll().unwrap();
         assert!(a.text("main.typ").unwrap().contains("20% least important"));
-        assert_eq!(a.review_comments(&Default::default()).unwrap()[0].status, "addressed");
+        assert_eq!(
+            a.review_comments(&Default::default()).unwrap()[0].status,
+            "addressed"
+        );
         // A doesn't send B's changes back to B.
-        let echo = a.store().export_changes(0, Some("device-b"), 10_000).unwrap();
-        assert!(echo.records.iter().all(|r| !matches!(r, Record::Comment { status, .. } if status == "addressed")));
+        let echo = a
+            .store()
+            .export_changes(0, Some("device-b"), 10_000)
+            .unwrap();
+        assert!(echo
+            .records
+            .iter()
+            .all(|r| !matches!(r, Record::Comment { status, .. } if status == "addressed")));
     }
 }

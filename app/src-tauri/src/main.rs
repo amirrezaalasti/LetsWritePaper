@@ -11,7 +11,9 @@
 //! The same binary doubles as the MCP server (`letswritepaper mcp`) and the
 //! Claude Code attribution hook (`letswritepaper ingest --from-hook`).
 
+mod assistants;
 mod claude;
+mod setup;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -25,7 +27,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use paper_compile::{CompileOptions, Compiler, Diagnostic};
-use paper_core::history::{DocDiff, LogEntry, VersionRef};
+use paper_core::history::{Change, DocDiff, LogEntry, VersionRef};
 use paper_core::outline::Section;
 use paper_core::review::{ReviewComment, ReviewRound, Scores, CATEGORIES, PERSONAS, SEVERITIES};
 use paper_core::skills::{AppliedSkill, SkillSource};
@@ -169,29 +171,50 @@ fn start_session(app: &AppHandle, state: &AppState, project: Project) -> CmdResu
         }
     })
     .ok()
-    .and_then(|mut w| w.watch(&ws.project.root, RecursiveMode::Recursive).ok().map(|_| w));
+    .and_then(|mut w| {
+        w.watch(&ws.project.root, RecursiveMode::Recursive)
+            .ok()
+            .map(|_| w)
+    });
     let info = project_info(&ws);
     let root = ws.project.root.clone();
     state.claude.stop_all();
     *state.remote.lock().map_err(err)? = None;
-    *state.session.lock().map_err(err)? = Some(Session { ws, _watcher: watcher, fs_events: rx, pending: HashMap::new() });
+    *state.session.lock().map_err(err)? = Some(Session {
+        ws,
+        _watcher: watcher,
+        fs_events: rx,
+        pending: HashMap::new(),
+    });
     if let Err(e) = start_remote(state, &root) {
         eprintln!("sync not started: {e}");
     }
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    spawn_sync(app.clone(), state.session.clone(), state.generation.clone(), generation);
+    spawn_sync(
+        app.clone(),
+        state.session.clone(),
+        state.generation.clone(),
+        generation,
+    );
     Ok(info)
 }
 
 /// Tail other processes' edits, adopt on-disk edits, forward events to the UI.
-fn spawn_sync(app: AppHandle, session: Arc<Mutex<Option<Session>>>, gen: Arc<AtomicU64>, mine: u64) {
+fn spawn_sync(
+    app: AppHandle,
+    session: Arc<Mutex<Option<Session>>>,
+    gen: Arc<AtomicU64>,
+    mine: u64,
+) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(200));
         if gen.load(Ordering::SeqCst) != mine {
             return;
         }
         let events = {
-            let Ok(mut guard) = session.lock() else { return };
+            let Ok(mut guard) = session.lock() else {
+                return;
+            };
             let Some(s) = guard.as_mut() else { return };
             let _ = s.ws.try_take_ownership();
             let _ = s.ws.poll();
@@ -221,8 +244,19 @@ fn spawn_sync(app: AppHandle, session: Arc<Mutex<Option<Session>>>, gen: Arc<Ato
         let mut meta = false;
         for e in events {
             match e {
-                WorkspaceEvent::DocUpdate { path, update, author } => {
-                    let _ = app.emit("paper://doc-update", DocUpdatePayload { path, update: B64.encode(update), author });
+                WorkspaceEvent::DocUpdate {
+                    path,
+                    update,
+                    author,
+                } => {
+                    let _ = app.emit(
+                        "paper://doc-update",
+                        DocUpdatePayload {
+                            path,
+                            update: B64.encode(update),
+                            author,
+                        },
+                    );
                 }
                 WorkspaceEvent::DocAdded { path } => {
                     let _ = app.emit("paper://doc-added", path);
@@ -246,11 +280,20 @@ fn open_project(app: AppHandle, state: State<AppState>, path: String) -> CmdResu
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn init_project(app: AppHandle, state: State<AppState>, path: String, title: String, format: Format) -> CmdResult<ProjectInfo> {
+fn init_project(
+    app: AppHandle,
+    state: State<AppState>,
+    path: String,
+    title: String,
+    format: Format,
+) -> CmdResult<ProjectInfo> {
     let project = Project::init(Path::new(&path), &title, format).map_err(err)?;
     let info = start_session(&app, &state, project.clone())?;
     if let Ok(exe) = std::env::current_exe() {
-        let _ = paper_core::agents::write_agent_config(&project, &paper_core::agents::Launcher { exe: &exe });
+        let _ = paper_core::agents::write_agent_config(
+            &project,
+            &paper_core::agents::Launcher { exe: &exe },
+        );
     }
     Ok(info)
 }
@@ -264,7 +307,12 @@ fn project_info_cmd(state: State<AppState>) -> CmdResult<ProjectInfo> {
 #[tauri::command]
 fn setup_agents(state: State<AppState>) -> CmdResult<Vec<String>> {
     let exe = std::env::current_exe().map_err(err)?;
-    state.with(|ws| paper_core::agents::write_agent_config(&ws.project, &paper_core::agents::Launcher { exe: &exe }))
+    state.with(|ws| {
+        paper_core::agents::write_agent_config(
+            &ws.project,
+            &paper_core::agents::Launcher { exe: &exe },
+        )
+    })
 }
 
 #[tauri::command]
@@ -294,7 +342,10 @@ fn push_update(state: State<AppState>, path: String, update: String) -> CmdResul
 
 #[tauri::command(rename_all = "snake_case")]
 fn create_document(state: State<AppState>, path: String, content: String) -> CmdResult<()> {
-    state.with(|ws| ws.create_document(&path, &content, &me(), Some("new document")).map(|_| ()))
+    state.with(|ws| {
+        ws.create_document(&path, &content, &me(), Some("new document"))
+            .map(|_| ())
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -310,13 +361,39 @@ fn outline(state: State<AppState>, path: String) -> CmdResult<Vec<Section>> {
 // ---- history ---------------------------------------------------------------
 
 #[tauri::command(rename_all = "snake_case")]
-fn history(state: State<AppState>, path: Option<String>, limit: Option<usize>) -> CmdResult<Vec<LogEntry>> {
+fn history(
+    state: State<AppState>,
+    path: Option<String>,
+    limit: Option<usize>,
+) -> CmdResult<Vec<LogEntry>> {
     state.with(|ws| ws.log(path.as_deref(), limit.unwrap_or(100)))
 }
 
+/// Every edit, newest first, each with a description of what changed.
 #[tauri::command(rename_all = "snake_case")]
-fn diff(state: State<AppState>, from: String, to: String, path: Option<String>) -> CmdResult<Vec<DocDiff>> {
-    state.with(|ws| ws.diff(&VersionRef::parse(&from), &VersionRef::parse(&to), path.as_deref()))
+fn changes(
+    state: State<AppState>,
+    path: Option<String>,
+    author: Option<String>,
+    limit: Option<usize>,
+) -> CmdResult<Vec<Change>> {
+    state.with(|ws| ws.changes(path.as_deref(), author.as_deref(), limit.unwrap_or(200)))
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn diff(
+    state: State<AppState>,
+    from: String,
+    to: String,
+    path: Option<String>,
+) -> CmdResult<Vec<DocDiff>> {
+    state.with(|ws| {
+        ws.diff(
+            &VersionRef::parse(&from),
+            &VersionRef::parse(&to),
+            path.as_deref(),
+        )
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -335,7 +412,12 @@ struct BlameResult {
 
 #[tauri::command(rename_all = "snake_case")]
 fn blame(state: State<AppState>, path: String) -> CmdResult<BlameResult> {
-    state.with(|ws| Ok(BlameResult { lines: ws.blame(&path)?, authors: ws.authors()? }))
+    state.with(|ws| {
+        Ok(BlameResult {
+            lines: ws.blame(&path)?,
+            authors: ws.authors()?,
+        })
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -344,8 +426,20 @@ fn checkpoints(state: State<AppState>) -> CmdResult<Vec<Checkpoint>> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn create_checkpoint(state: State<AppState>, name: String, message: String, kind: Option<String>) -> CmdResult<Checkpoint> {
-    state.with(|ws| ws.checkpoint(&name, &message, kind.as_deref().unwrap_or("checkpoint"), &me()))
+fn create_checkpoint(
+    state: State<AppState>,
+    name: String,
+    message: String,
+    kind: Option<String>,
+) -> CmdResult<Checkpoint> {
+    state.with(|ws| {
+        ws.checkpoint(
+            &name,
+            &message,
+            kind.as_deref().unwrap_or("checkpoint"),
+            &me(),
+        )
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -361,7 +455,13 @@ fn proposals(state: State<AppState>, status: Option<String>) -> CmdResult<Vec<Pr
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn propose_edit(state: State<AppState>, path: String, old_text: String, new_text: String, rationale: String) -> CmdResult<Proposal> {
+fn propose_edit(
+    state: State<AppState>,
+    path: String,
+    old_text: String,
+    new_text: String,
+    rationale: String,
+) -> CmdResult<Proposal> {
     state.with(|ws| ws.propose(&path, &old_text, &new_text, &rationale, &me()))
 }
 
@@ -383,14 +483,32 @@ fn review_rounds(state: State<AppState>) -> CmdResult<Vec<ReviewRound>> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn review_comments(state: State<AppState>, query: Option<CommentQuery>) -> CmdResult<Vec<ReviewComment>> {
-    let q = query.unwrap_or(CommentQuery { round_id: None, status: None, path: None });
-    state.with(|ws| ws.review_comments(&CommentFilter { round_id: q.round_id, status: q.status, doc: q.path }))
+fn review_comments(
+    state: State<AppState>,
+    query: Option<CommentQuery>,
+) -> CmdResult<Vec<ReviewComment>> {
+    let q = query.unwrap_or(CommentQuery {
+        round_id: None,
+        status: None,
+        path: None,
+    });
+    state.with(|ws| {
+        ws.review_comments(&CommentFilter {
+            round_id: q.round_id,
+            status: q.status,
+            doc: q.path,
+        })
+    })
 }
 
 /// Humans can review too (e.g. an advisor's internal review round).
 #[tauri::command(rename_all = "snake_case")]
-fn start_review(state: State<AppState>, title: String, persona: Option<String>, venue: Option<String>) -> CmdResult<ReviewRound> {
+fn start_review(
+    state: State<AppState>,
+    title: String,
+    persona: Option<String>,
+    venue: Option<String>,
+) -> CmdResult<ReviewRound> {
     state.with(|ws| ws.start_review(&title, persona.as_deref(), venue.as_deref(), &me()))
 }
 
@@ -404,16 +522,30 @@ fn add_review_comment(
     category: String,
     comment: String,
 ) -> CmdResult<ReviewComment> {
-    state.with(|ws| ws.add_review_comment(round_id, &path, &quote, &severity, &category, &comment, None))
+    state.with(|ws| {
+        ws.add_review_comment(
+            round_id, &path, &quote, &severity, &category, &comment, None,
+        )
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn finish_review(state: State<AppState>, round_id: i64, summary: String, scores: Option<Scores>) -> CmdResult<ReviewRound> {
+fn finish_review(
+    state: State<AppState>,
+    round_id: i64,
+    summary: String,
+    scores: Option<Scores>,
+) -> CmdResult<ReviewRound> {
     state.with(|ws| ws.finish_review(round_id, &summary, scores.as_ref()))
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn respond_to_comment(state: State<AppState>, id: i64, response: String, status: String) -> CmdResult<ReviewComment> {
+fn respond_to_comment(
+    state: State<AppState>,
+    id: i64,
+    response: String,
+    status: String,
+) -> CmdResult<ReviewComment> {
     state.with(|ws| ws.respond_to_comment(id, &response, &status, &me()))
 }
 
@@ -439,7 +571,12 @@ fn skills(state: State<AppState>) -> CmdResult<Vec<SkillInfo>> {
                 source: s.source,
                 auto_sections: s.sections.clone(),
                 global: cfg.global.contains(&s.name),
-                bound_sections: cfg.sections.iter().filter(|(_, v)| v.contains(&s.name)).map(|(k, _)| k.clone()).collect(),
+                bound_sections: cfg
+                    .sections
+                    .iter()
+                    .filter(|(_, v)| v.contains(&s.name))
+                    .map(|(k, _)| k.clone())
+                    .collect(),
                 disabled: cfg.disabled.contains(&s.name),
             })
             .collect())
@@ -475,16 +612,33 @@ fn unbind_skill(state: State<AppState>, skill: String, section: Option<String>) 
 #[tauri::command(rename_all = "snake_case")]
 fn install_skill(state: State<AppState>, path: String, user: bool) -> CmdResult<String> {
     state.with(|ws| {
-        let name = paper_core::skills::install_skill(Path::new(&path), if user { None } else { Some(&ws.project) })?;
+        let name = paper_core::skills::install_skill(
+            Path::new(&path),
+            if user { None } else { Some(&ws.project) },
+        )?;
         ws.reload_skills();
         Ok(name)
     })
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn create_skill(state: State<AppState>, name: String, description: String, kind: String, sections: Vec<String>, body: String) -> CmdResult<String> {
+fn create_skill(
+    state: State<AppState>,
+    name: String,
+    description: String,
+    kind: String,
+    sections: Vec<String>,
+    body: String,
+) -> CmdResult<String> {
     state.with(|ws| {
-        let p = paper_core::skills::create_skill(&ws.project, &name, &description, &kind, &sections, &body)?;
+        let p = paper_core::skills::create_skill(
+            &ws.project,
+            &name,
+            &description,
+            &kind,
+            &sections,
+            &body,
+        )?;
         ws.reload_skills();
         Ok(p.display().to_string())
     })
@@ -507,11 +661,22 @@ async fn compile(state: State<'_, AppState>, main: Option<String>) -> CmdResult<
     let compiler = state.compiler.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut c = compiler.lock().map_err(err)?;
-        let out = c.compile(&root, &main, &sources, CompileOptions { svg: true, pdf: false });
+        let out = c.compile(
+            &root,
+            &main,
+            &sources,
+            CompileOptions {
+                svg: true,
+                pdf: false,
+            },
+        );
         let pdf = if main.ends_with(".typ") {
             None
         } else {
-            out.pdf_path.as_ref().and_then(|p| std::fs::read(p).ok()).map(|b| B64.encode(b))
+            out.pdf_path
+                .as_ref()
+                .and_then(|p| std::fs::read(p).ok())
+                .map(|b| B64.encode(b))
         };
         Ok(CompileResult {
             ok: out.ok,
@@ -538,13 +703,32 @@ async fn export_pdf(state: State<'_, AppState>) -> CmdResult<String> {
         for d in s.ws.documents() {
             sources.insert(d.clone(), s.ws.text(&d).map_err(err)?);
         }
-        (s.ws.project.root.clone(), s.ws.project.manifest.paper.main.clone(), sources)
+        (
+            s.ws.project.root.clone(),
+            s.ws.project.manifest.paper.main.clone(),
+            sources,
+        )
     };
     let compiler = state.compiler.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let out = compiler.lock().map_err(err)?.compile(&root, &main, &sources, CompileOptions { svg: false, pdf: true });
-        let src = out.pdf_path.ok_or_else(|| "compilation failed; see diagnostics".to_string())?;
-        let dest = root.join(Path::new(&main).with_extension("pdf").file_name().unwrap_or_default());
+        let out = compiler.lock().map_err(err)?.compile(
+            &root,
+            &main,
+            &sources,
+            CompileOptions {
+                svg: false,
+                pdf: true,
+            },
+        );
+        let src = out
+            .pdf_path
+            .ok_or_else(|| "compilation failed; see diagnostics".to_string())?;
+        let dest = root.join(
+            Path::new(&main)
+                .with_extension("pdf")
+                .file_name()
+                .unwrap_or_default(),
+        );
         std::fs::copy(&src, &dest).map_err(err)?;
         Ok(dest.display().to_string())
     })
@@ -556,15 +740,23 @@ async fn export_pdf(state: State<'_, AppState>) -> CmdResult<String> {
 
 /// Resume syncing (and hosting, if this machine hosts the relay) for a shared project.
 fn start_remote(state: &AppState, root: &Path) -> Result<(), String> {
-    let Some(cfg) = paper_sync::RemoteConfig::load(root) else { return Ok(()) };
+    let Some(cfg) = paper_sync::RemoteConfig::load(root) else {
+        return Ok(());
+    };
     let (relay, link) = match paper_sync::resume_hosting(&cfg) {
         Ok(Some((relay, link))) => (Some(relay), link),
         Ok(None) => (None, cfg.link()),
         // The port is taken: this app instance is already hosting it.
         Err(_) => (None, cfg.public_link()),
     };
-    let handle = paper_sync::start(root).map_err(err)?.ok_or("project is not shared")?;
-    *state.remote.lock().map_err(err)? = Some(RemoteState { handle, _relay: relay, link });
+    let handle = paper_sync::start(root)
+        .map_err(err)?
+        .ok_or("project is not shared")?;
+    *state.remote.lock().map_err(err)? = Some(RemoteState {
+        handle,
+        _relay: relay,
+        link,
+    });
     Ok(())
 }
 
@@ -583,7 +775,10 @@ fn share_info(state: State<AppState>) -> CmdResult<ShareInfo> {
     let remote = state.remote.lock().map_err(err)?;
     Ok(ShareInfo {
         shared: cfg.is_some(),
-        link: remote.as_ref().map(|r| r.link.clone()).or_else(|| cfg.as_ref().map(|c| c.public_link())),
+        link: remote
+            .as_ref()
+            .map(|r| r.link.clone())
+            .or_else(|| cfg.as_ref().map(|c| c.public_link())),
         hosted_here: cfg.as_ref().is_some_and(|c| c.hosted.is_some()),
         status: remote.as_ref().map(|r| r.handle.snapshot()),
     })
@@ -592,28 +787,51 @@ fn share_info(state: State<AppState>) -> CmdResult<ShareInfo> {
 /// Share the open paper. `mode`: `network` hosts a relay in this app for
 /// devices on the same network; `server` uses a relay at `server`.
 #[tauri::command(rename_all = "snake_case")]
-async fn share_project(app: AppHandle, state: State<'_, AppState>, mode: String, server: Option<String>, secret: Option<String>) -> CmdResult<ShareInfo> {
+async fn share_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: String,
+    server: Option<String>,
+    secret: Option<String>,
+) -> CmdResult<ShareInfo> {
     let (project, root) = state.with(|ws| Ok((ws.project.clone(), ws.project.root.clone())))?;
     let data = app.path().app_data_dir().map_err(err)?.join("relay");
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         if mode == "network" {
-            let (relay, _) = paper_sync::share_on_this_network(&project, &data, paper_sync::DEFAULT_PORT)
-                .or_else(|_| paper_sync::share_on_this_network(&project, &data, 0))
-                .map_err(err)?;
+            let (relay, _) =
+                paper_sync::share_on_this_network(&project, &data, paper_sync::DEFAULT_PORT)
+                    .or_else(|_| paper_sync::share_on_this_network(&project, &data, 0))
+                    .map_err(err)?;
             drop(relay);
             Ok(())
         } else {
-            let server = server.filter(|s| !s.trim().is_empty()).ok_or("enter the relay server URL")?;
-            paper_sync::share(&project, server.trim(), secret.as_deref().filter(|s| !s.is_empty())).map(|_| ()).map_err(err)
+            let server = server
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("enter the relay server URL")?;
+            paper_sync::share(
+                &project,
+                server.trim(),
+                secret.as_deref().filter(|s| !s.is_empty()),
+            )
+            .map(|_| ())
+            .map_err(err)
         }
     })
     .await
     .map_err(err)?;
     result?;
     // A hosted relay keeps serving on its own thread after `share_on_this_network`.
-    let link = paper_sync::RemoteConfig::load(&root).ok_or("sharing failed")?.public_link();
-    let handle = paper_sync::start(&root).map_err(err)?.ok_or("project is not shared")?;
-    *state.remote.lock().map_err(err)? = Some(RemoteState { handle, _relay: None, link });
+    let link = paper_sync::RemoteConfig::load(&root)
+        .ok_or("sharing failed")?
+        .public_link();
+    let handle = paper_sync::start(&root)
+        .map_err(err)?
+        .ok_or("project is not shared")?;
+    *state.remote.lock().map_err(err)? = Some(RemoteState {
+        handle,
+        _relay: None,
+        link,
+    });
     share_info(state)
 }
 
@@ -625,24 +843,53 @@ fn stop_sharing(state: State<AppState>) -> CmdResult<()> {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-async fn join_project(app: AppHandle, state: State<'_, AppState>, link: String, dir: String) -> CmdResult<ProjectInfo> {
+async fn join_project(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    link: String,
+    dir: String,
+) -> CmdResult<ProjectInfo> {
     let dir = PathBuf::from(dir);
-    let project = tauri::async_runtime::spawn_blocking(move || paper_sync::join(&link, &dir).map_err(err))
-        .await
-        .map_err(err)??;
+    let project =
+        tauri::async_runtime::spawn_blocking(move || paper_sync::join(&link, &dir).map_err(err))
+            .await
+            .map_err(err)??;
     start_session(&app, &state, project)
 }
 
 // ---- Claude panel ----------------------------------------------------------------
 
 #[tauri::command]
-async fn claude_status() -> CmdResult<claude::ClaudeStatus> {
-    tauri::async_runtime::spawn_blocking(claude::status).await.map_err(err)
+async fn setup_status() -> CmdResult<setup::SetupStatus> {
+    tauri::async_runtime::spawn_blocking(setup::status)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn setup_save(name: String, setup_done: bool) -> CmdResult<setup::SetupStatus> {
+    setup::save(name, setup_done)
 }
 
 #[tauri::command]
-async fn claude_install(app: AppHandle) -> CmdResult<claude::ClaudeStatus> {
-    tauri::async_runtime::spawn_blocking(move || claude::install(&app)).await.map_err(err)?
+async fn install_tectonic(app: AppHandle) -> CmdResult<setup::SetupStatus> {
+    tauri::async_runtime::spawn_blocking(move || setup::install_tectonic(&app))
+        .await
+        .map_err(err)?
+}
+
+#[tauri::command]
+async fn claude_status(assistant: Option<String>) -> CmdResult<claude::ClaudeStatus> {
+    tauri::async_runtime::spawn_blocking(move || claude::status_for(assistant.as_deref().unwrap_or("claude")))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn claude_install(app: AppHandle, assistant: Option<String>) -> CmdResult<claude::ClaudeStatus> {
+    tauri::async_runtime::spawn_blocking(move || claude::install_for(&app, assistant.as_deref().unwrap_or("claude")))
+        .await
+        .map_err(err)?
 }
 
 #[tauri::command]
@@ -652,15 +899,56 @@ fn claude_sessions(state: State<AppState>) -> CmdResult<Vec<claude::SessionInfo>
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn claude_start(app: AppHandle, state: State<AppState>, chat_id: String, resume: Option<String>, mode: String, model: Option<String>) -> CmdResult<()> {
+fn claude_start(
+    app: AppHandle,
+    state: State<AppState>,
+    chat_id: String,
+    resume: Option<String>,
+    mode: String,
+    model: Option<String>,
+    provider: Option<String>,
+    foundry_resource: Option<String>,
+    foundry_api_key: Option<String>,
+    assistant: Option<String>,
+    api_key: Option<String>,
+) -> CmdResult<()> {
     let root = state.with(|ws| Ok(ws.project.root.clone()))?;
-    state.claude.start(&app, &root, &chat_id, resume.as_deref(), &mode, model.as_deref())
+    state.claude.start(
+        &app,
+        &root,
+        &chat_id,
+        resume.as_deref(),
+        &mode,
+        model.as_deref(),
+        provider.as_deref(),
+        foundry_resource.as_deref(),
+        foundry_api_key.as_deref(),
+        assistant.as_deref(),
+        api_key.as_deref(),
+    )
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn claude_send(state: State<AppState>, chat_id: String, text: String, context: Option<claude::EditorContext>) -> CmdResult<()> {
+fn claude_send(
+    app: AppHandle,
+    state: State<AppState>,
+    chat_id: String,
+    text: String,
+    context: Option<claude::EditorContext>,
+) -> CmdResult<()> {
     let root = state.with(|ws| Ok(ws.project.root.clone()))?;
-    state.claude.send(&root, &chat_id, &text, &context.unwrap_or_default())
+    state
+        .claude
+        .send(&app, &root, &chat_id, &text, &context.unwrap_or_default())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn claude_permission(
+    state: State<AppState>,
+    chat_id: String,
+    reply: claude::PermissionReply,
+) -> CmdResult<()> {
+    state.claude.permission(&chat_id, &reply)
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -668,15 +956,51 @@ fn claude_stop(state: State<AppState>, chat_id: String) -> CmdResult<Option<Stri
     Ok(state.claude.stop(&chat_id))
 }
 
-/// Open a terminal for `login`, `resume` or `remote` (continue on another device).
+#[tauri::command]
+async fn claude_auth(assistant: Option<String>) -> CmdResult<claude::ClaudeAuth> {
+    tauri::async_runtime::spawn_blocking(move || claude::auth_for(assistant.as_deref().unwrap_or("claude")))
+        .await
+        .map_err(err)
+}
+
 #[tauri::command(rename_all = "snake_case")]
-fn claude_terminal(state: State<AppState>, action: String, session: Option<String>, chat_id: Option<String>) -> CmdResult<String> {
-    let (root, title) = state.with(|ws| Ok((ws.project.root.clone(), ws.project.manifest.paper.title.clone())))?;
+async fn assistant_store_key(assistant: String, api_key: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || claude::login_api_key(&assistant, &api_key))
+        .await
+        .map_err(err)?
+}
+
+/// Open a terminal for `login`, `resume` or `remote` (continue on another device).
+/// `provider` is `claudeai`, `console`, `bedrock`, `vertex`, or `foundry`.
+#[tauri::command(rename_all = "snake_case")]
+fn claude_terminal(
+    state: State<AppState>,
+    action: String,
+    session: Option<String>,
+    chat_id: Option<String>,
+    provider: Option<String>,
+    foundry_resource: Option<String>,
+    assistant: Option<String>,
+) -> CmdResult<String> {
+    let (root, title) = state.with(|ws| {
+        Ok((
+            ws.project.root.clone(),
+            ws.project.manifest.paper.title.clone(),
+        ))
+    })?;
     // A session must not run in two processes at once: hand it over.
     if let Some(id) = chat_id {
         state.claude.stop(&id);
     }
-    claude::open_in_terminal(&root, &action, session.as_deref(), &title)
+    claude::open_in_terminal(
+        &root,
+        &action,
+        session.as_deref(),
+        &title,
+        provider.as_deref(),
+        foundry_resource.as_deref(),
+        assistant.as_deref(),
+    )
 }
 
 /// `letswritepaper mcp` / `letswritepaper ingest --from-hook` entry points.
@@ -684,7 +1008,11 @@ fn run_cli_mode() -> Option<i32> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("mcp") => {
-            let agent = args.iter().position(|a| a == "--agent").and_then(|i| args.get(i + 1)).cloned();
+            let agent = args
+                .iter()
+                .position(|a| a == "--agent")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
             let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
             Some(match paper_mcp::serve_stdio(&cwd, agent.as_deref()) {
                 Ok(()) => 0,
@@ -746,6 +1074,7 @@ fn main() {
             delete_document,
             outline,
             history,
+            changes,
             diff,
             text_at,
             blame,
@@ -776,11 +1105,17 @@ fn main() {
             share_project,
             stop_sharing,
             join_project,
+            setup_status,
+            setup_save,
+            install_tectonic,
             claude_status,
+            claude_auth,
+            assistant_store_key,
             claude_install,
             claude_sessions,
             claude_start,
             claude_send,
+            claude_permission,
             claude_stop,
             claude_terminal,
         ])

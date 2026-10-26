@@ -10,6 +10,7 @@ default = ["typst"]
 typst = ["dep:typst", "dep:typst-layout", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit", "dep:ureq"]
 
 [dependencies]
+paper-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

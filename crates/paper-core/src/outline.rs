@@ -46,7 +46,9 @@ struct Heading {
 }
 
 pub fn outline(path: &str, text: &str) -> Vec<Section> {
-    let Some(syntax) = Syntax::from_path(path) else { return vec![] };
+    let Some(syntax) = Syntax::from_path(path) else {
+        return vec![];
+    };
     let heads = match syntax {
         Syntax::Latex => latex_headings(text),
         Syntax::Typst => typst_headings(text),
@@ -81,8 +83,15 @@ pub fn find_section<'a>(sections: &'a [Section], query: &str) -> Option<&'a Sect
     let q = q.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ');
     sections
         .iter()
-        .find(|s| s.title.to_lowercase() == q || s.label.as_deref().map(str::to_lowercase).as_deref() == Some(q))
-        .or_else(|| sections.iter().find(|s| s.title.to_lowercase().starts_with(q)))
+        .find(|s| {
+            s.title.to_lowercase() == q
+                || s.label.as_deref().map(str::to_lowercase).as_deref() == Some(q)
+        })
+        .or_else(|| {
+            sections
+                .iter()
+                .find(|s| s.title.to_lowercase().starts_with(q))
+        })
         .or_else(|| sections.iter().find(|s| s.title.to_lowercase().contains(q)))
 }
 
@@ -96,11 +105,13 @@ pub fn section_at(sections: &[Section], byte: usize) -> Option<&Section> {
 
 fn line_iter(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     let mut offset = 0;
-    text.split_inclusive('\n').enumerate().map(move |(i, line)| {
-        let start = offset;
-        offset += line.len();
-        (i + 1, start, line.trim_end_matches(['\n', '\r']))
-    })
+    text.split_inclusive('\n')
+        .enumerate()
+        .map(move |(i, line)| {
+            let start = offset;
+            offset += line.len();
+            (i + 1, start, line.trim_end_matches(['\n', '\r']))
+        })
 }
 
 const LATEX_LEVELS: &[(&str, u8)] = &[
@@ -137,9 +148,13 @@ fn latex_headings(text: &str) -> Vec<Heading> {
             }
             continue;
         }
-        let Some(rest) = trimmed.strip_prefix('\\') else { continue };
+        let Some(rest) = trimmed.strip_prefix('\\') else {
+            continue;
+        };
         for (cmd, level) in LATEX_LEVELS {
-            let Some(after) = rest.strip_prefix(cmd) else { continue };
+            let Some(after) = rest.strip_prefix(cmd) else {
+                continue;
+            };
             let after = after.strip_prefix('*').unwrap_or(after).trim_start();
             // Optional short title: \section[short]{Long}
             let after = if after.starts_with('[') {
@@ -172,7 +187,12 @@ fn latex_headings(text: &str) -> Vec<Heading> {
 
 /// A `\label{..}` on the line right after a heading.
 fn next_line_label(text: &str, from: usize) -> Option<String> {
-    let next = text.get(from..)?.trim_start_matches(['\r', '\n']).lines().next()?.trim();
+    let next = text
+        .get(from..)?
+        .trim_start_matches(['\r', '\n'])
+        .lines()
+        .next()?
+        .trim();
     next.strip_prefix("\\label").and_then(braced)
 }
 
@@ -196,7 +216,10 @@ fn braced(s: &str) -> Option<String> {
 }
 
 fn clean_title(t: &str) -> String {
-    t.replace(['{', '}', '~'], " ").split_whitespace().collect::<Vec<_>>().join(" ")
+    t.replace(['{', '}', '~'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn typst_headings(text: &str) -> Vec<Heading> {
@@ -221,7 +244,14 @@ fn typst_headings(text: &str) -> Vec<Heading> {
                     title = title[..i].trim().to_string();
                 }
             }
-            heads.push(Heading { level: level as u8, title, label, line: line_no, start, end: None });
+            heads.push(Heading {
+                level: level as u8,
+                title,
+                label,
+                line: line_no,
+                start,
+                end: None,
+            });
         } else if let Some(rest) = trimmed.strip_prefix("#heading(") {
             // `#heading(level: 1, numbering: none)[Abstract]`
             let level = rest
@@ -295,7 +325,15 @@ RW.
     fn latex_outline() {
         let s = outline("main.tex", TEX);
         let titles: Vec<_> = s.iter().map(|s| s.title.as_str()).collect();
-        assert_eq!(titles, ["Abstract", "Introduction", "Our \\em Key Idea", "Related Work"]);
+        assert_eq!(
+            titles,
+            [
+                "Abstract",
+                "Introduction",
+                "Our \\em Key Idea",
+                "Related Work"
+            ]
+        );
         assert_eq!(s[1].label.as_deref(), Some("sec:intro"));
         assert_eq!(s[3].label.as_deref(), Some("sec:rw"));
         // Introduction spans its subsection and stops at Related Work.
@@ -312,8 +350,14 @@ RW.
         let src = "#heading(level: 1, numbering: none)[Abstract]\nText\n= Intro <sec:intro>\nA\n== Detail\nB\n```\n= not a heading\n```\n= Method\n";
         let s = outline("main.typ", src);
         let titles: Vec<_> = s.iter().map(|s| (s.level, s.title.as_str())).collect();
-        assert_eq!(titles, [(1, "Abstract"), (1, "Intro"), (2, "Detail"), (1, "Method")]);
+        assert_eq!(
+            titles,
+            [(1, "Abstract"), (1, "Intro"), (2, "Detail"), (1, "Method")]
+        );
         assert_eq!(s[1].label.as_deref(), Some("sec:intro"));
-        assert_eq!(section_at(&s, src.find("B").unwrap()).unwrap().title, "Detail");
+        assert_eq!(
+            section_at(&s, src.find("B").unwrap()).unwrap().title,
+            "Detail"
+        );
     }
 }

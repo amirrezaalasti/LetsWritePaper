@@ -10,7 +10,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
-use yrs::{Any, Doc, GetString, OffsetKind, Options, Out, ReadTxn, StateVector, Text, TextRef, Transact, Update};
+use yrs::{
+    Any, Doc, GetString, OffsetKind, Options, Out, ReadTxn, StateVector, Text, TextRef, Transact,
+    Update,
+};
 
 use crate::textdiff::{compute_edits, utf16_offset};
 use crate::{Error, Result};
@@ -38,7 +41,10 @@ pub struct BlameRun {
 
 impl PaperDoc {
     pub fn new() -> Self {
-        let doc = Doc::with_options(Options { offset_kind: OffsetKind::Utf16, ..Options::default() });
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
         let text = doc.get_or_insert_text(TEXT_NAME);
         PaperDoc { doc, text }
     }
@@ -52,8 +58,10 @@ impl PaperDoc {
         {
             let mut txn = d.doc.transact_mut();
             for u in updates {
-                let update = Update::decode_v1(u.as_ref()).map_err(|e| Error::Crdt(e.to_string()))?;
-                txn.apply_update(update).map_err(|e| Error::Crdt(e.to_string()))?;
+                let update =
+                    Update::decode_v1(u.as_ref()).map_err(|e| Error::Crdt(e.to_string()))?;
+                txn.apply_update(update)
+                    .map_err(|e| Error::Crdt(e.to_string()))?;
             }
         }
         Ok(d)
@@ -82,7 +90,9 @@ impl PaperDoc {
 
     /// The whole document as a single update.
     pub fn encode_state(&self) -> Vec<u8> {
-        self.doc.transact().encode_state_as_update_v1(&StateVector::default())
+        self.doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default())
     }
 
     /// Everything the holder of `state_vector` is missing.
@@ -113,7 +123,8 @@ impl PaperDoc {
                     self.text.remove_range(&mut txn, *start, end - start);
                 }
                 if !insert.is_empty() {
-                    self.text.insert_with_attributes(&mut txn, *start, insert, Self::attrs(author));
+                    self.text
+                        .insert_with_attributes(&mut txn, *start, insert, Self::attrs(author));
                 }
             }
         }
@@ -131,7 +142,13 @@ impl PaperDoc {
         let old = self.text();
         let edits: Vec<_> = compute_edits(&old, new_text)
             .into_iter()
-            .map(|e| (utf16_offset(&old, e.start), utf16_offset(&old, e.end), e.insert))
+            .map(|e| {
+                (
+                    utf16_offset(&old, e.start),
+                    utf16_offset(&old, e.end),
+                    e.insert,
+                )
+            })
             .collect();
         self.apply_edits(author, &edits)
     }
@@ -142,7 +159,9 @@ impl PaperDoc {
         let diffs = self.text.diff(&txn, YChange::identity);
         let mut runs: Vec<BlameRun> = vec![];
         for d in diffs {
-            let Out::Any(Any::String(s)) = d.insert else { continue };
+            let Out::Any(Any::String(s)) = d.insert else {
+                continue;
+            };
             let author = d
                 .attributes
                 .as_ref()
@@ -153,7 +172,10 @@ impl PaperDoc {
                 });
             match runs.last_mut() {
                 Some(r) if r.author == author => r.text.push_str(&s),
-                _ => runs.push(BlameRun { author, text: s.to_string() }),
+                _ => runs.push(BlameRun {
+                    author,
+                    text: s.to_string(),
+                }),
             }
         }
         runs
@@ -167,12 +189,18 @@ mod tests {
     #[test]
     fn concurrent_edits_merge() {
         let base = PaperDoc::new();
-        let u0 = base.set_text("human:ada", "The results are good.\n").unwrap();
+        let u0 = base
+            .set_text("human:ada", "The results are good.\n")
+            .unwrap();
 
         let a = PaperDoc::from_updates([&u0]).unwrap();
         let b = PaperDoc::from_updates([&u0]).unwrap();
-        let ua = a.set_text("human:ada", "The results are very good.\n").unwrap();
-        let ub = b.set_text("agent:claude", "The results are good.\nWe discuss why.\n").unwrap();
+        let ua = a
+            .set_text("human:ada", "The results are very good.\n")
+            .unwrap();
+        let ub = b
+            .set_text("agent:claude", "The results are good.\nWe discuss why.\n")
+            .unwrap();
         a.apply_update(&ub).unwrap();
         b.apply_update(&ua).unwrap();
         assert_eq!(a.text(), b.text());
@@ -191,7 +219,10 @@ mod tests {
             .map(|r| r.text.as_str())
             .collect();
         assert_eq!(agent, "brave new ");
-        assert_eq!(runs.iter().map(|r| r.text.as_str()).collect::<String>(), "Hello brave new world");
+        assert_eq!(
+            runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+            "Hello brave new world"
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS updates (
     session TEXT NOT NULL,
     origin TEXT NOT NULL,
     message TEXT,
+    summary TEXT,
     added INTEGER NOT NULL DEFAULT 0,
     removed INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
@@ -135,6 +136,7 @@ CREATE INDEX IF NOT EXISTS changelog_key ON changelog(kind, key, seq);
 const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("documents", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
     ("updates", "uid", "TEXT"),
+    ("updates", "summary", "TEXT"),
     ("checkpoints", "uid", "TEXT"),
     ("proposals", "uid", "TEXT"),
     ("proposals", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
@@ -144,7 +146,13 @@ const ADDED_COLUMNS: &[(&str, &str, &str)] = &[
     ("review_comments", "round_uid", "TEXT"),
 ];
 
-const UID_TABLES: &[&str] = &["updates", "checkpoints", "proposals", "review_rounds", "review_comments"];
+const UID_TABLES: &[&str] = &[
+    "updates",
+    "checkpoints",
+    "proposals",
+    "review_rounds",
+    "review_comments",
+];
 
 pub fn new_uid() -> String {
     uuid::Uuid::new_v4().simple().to_string()
@@ -159,6 +167,8 @@ pub struct UpdateMeta {
     pub session: String,
     pub origin: String,
     pub message: Option<String>,
+    /// One-line description of the text that changed. Filled for every edit.
+    pub summary: Option<String>,
     pub added: i64,
     pub removed: i64,
     pub created_at: i64,
@@ -176,6 +186,7 @@ pub struct NewUpdate<'a> {
     pub session: &'a str,
     pub origin: &'a str,
     pub message: Option<&'a str>,
+    pub summary: Option<&'a str>,
     pub added: i64,
     pub removed: i64,
     pub data: &'a [u8],
@@ -225,7 +236,7 @@ pub(crate) fn author_from(row: &Row, idx: usize) -> rusqlite::Result<Author> {
 }
 
 const UPDATE_META_COLS: &str =
-    "id, doc, author_id, author_kind, author_name, session, origin, message, added, removed, created_at";
+    "id, doc, author_id, author_kind, author_name, session, origin, message, added, removed, created_at, summary";
 
 fn update_meta(row: &Row) -> rusqlite::Result<UpdateMeta> {
     Ok(UpdateMeta {
@@ -238,6 +249,7 @@ fn update_meta(row: &Row) -> rusqlite::Result<UpdateMeta> {
         added: row.get(8)?,
         removed: row.get(9)?,
         created_at: row.get(10)?,
+        summary: row.get(11)?,
     })
 }
 
@@ -345,7 +357,9 @@ impl Store {
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        let store = Store { conn: Connection::open_in_memory()? };
+        let store = Store {
+            conn: Connection::open_in_memory()?,
+        };
         store.migrate()?;
         Ok(store)
     }
@@ -359,14 +373,18 @@ impl Store {
                 |r| r.get::<_, i64>(0).map(|n| n > 0),
             )?;
             if !exists {
-                self.conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
             }
         }
         for table in UID_TABLES {
-            self.conn
-                .execute(&format!("UPDATE {table} SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL"), [])?;
-            self.conn
-                .execute_batch(&format!("CREATE UNIQUE INDEX IF NOT EXISTS {table}_uid ON {table}(uid)"))?;
+            self.conn.execute(
+                &format!("UPDATE {table} SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL"),
+                [],
+            )?;
+            self.conn.execute_batch(&format!(
+                "CREATE UNIQUE INDEX IF NOT EXISTS {table}_uid ON {table}(uid)"
+            ))?;
         }
         self.conn.execute(
             "UPDATE review_comments SET round_uid = (SELECT uid FROM review_rounds r WHERE r.id = round_id) WHERE round_uid IS NULL",
@@ -377,11 +395,18 @@ impl Store {
 
     /// Changes whenever another connection commits; cheap to poll.
     pub fn data_version(&self) -> Result<i64> {
-        Ok(self.conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+        Ok(self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
     }
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0)).optional()?)
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()?)
     }
 
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
@@ -395,15 +420,19 @@ impl Store {
     /// Note a local change for sync. `origin` identifies a remote device when the
     /// change arrived through a relay (so it is not echoed back to it).
     pub(crate) fn log_change(&self, kind: &str, key: &str, origin: Option<&str>) -> Result<()> {
-        self.conn
-            .execute("INSERT INTO changelog(kind, key, origin) VALUES (?1, ?2, ?3)", params![kind, key, origin])?;
+        self.conn.execute(
+            "INSERT INTO changelog(kind, key, origin) VALUES (?1, ?2, ?3)",
+            params![kind, key, origin],
+        )?;
         Ok(())
     }
 
     // ---- documents -------------------------------------------------------
 
     pub fn documents(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT path FROM documents WHERE deleted = 0 ORDER BY path")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM documents WHERE deleted = 0 ORDER BY path")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -423,8 +452,10 @@ impl Store {
     }
 
     pub fn remove_document(&self, path: &str) -> Result<()> {
-        self.conn
-            .execute("UPDATE documents SET deleted = 1, updated_at = ?2 WHERE path = ?1", params![path, now_ms()])?;
+        self.conn.execute(
+            "UPDATE documents SET deleted = 1, updated_at = ?2 WHERE path = ?1",
+            params![path, now_ms()],
+        )?;
         self.log_change("document", path, None)
     }
 
@@ -433,8 +464,8 @@ impl Store {
     pub fn insert_update(&self, u: &NewUpdate) -> Result<i64> {
         let uid = new_uid();
         self.conn.execute(
-            "INSERT INTO updates(uid, doc, author_id, author_kind, author_name, session, origin, message, added, removed, created_at, data)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO updates(uid, doc, author_id, author_kind, author_name, session, origin, message, summary, added, removed, created_at, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 uid,
                 u.doc,
@@ -444,6 +475,7 @@ impl Store {
                 u.session,
                 u.origin,
                 u.message,
+                u.summary,
                 u.added,
                 u.removed,
                 now_ms(),
@@ -470,7 +502,10 @@ impl Store {
             "SELECT {UPDATE_META_COLS}, data FROM updates WHERE id > ?1 AND origin != ?2 ORDER BY id"
         ))?;
         let rows = stmt.query_map(params![after, exclude_origin], |r| {
-            Ok(UpdateRecord { meta: update_meta(r)?, data: r.get(11)? })
+            Ok(UpdateRecord {
+                meta: update_meta(r)?,
+                data: r.get(12)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -481,20 +516,66 @@ impl Store {
             .query_row("SELECT COALESCE(MAX(id), 0) FROM updates", [], |r| r.get(0))?)
     }
 
+    /// Newest-first update metadata, optionally for one document and one author.
+    pub fn recent(
+        &self,
+        doc: Option<&str>,
+        author: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<UpdateMeta>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {UPDATE_META_COLS} FROM updates
+             WHERE (?1 IS NULL OR doc = ?1) AND (?2 IS NULL OR author_id = ?2)
+             ORDER BY id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt.query_map(params![doc, author, limit as i64], update_meta)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Update payloads in history order, used to describe edits that predate summaries.
+    pub fn doc_payloads(&self, doc: &str) -> Result<Vec<(i64, Vec<u8>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, data FROM updates WHERE doc = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![doc], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Remember a derived summary. Not part of the sync log: other devices can rebuild it.
+    pub fn set_summary(&self, id: i64, summary: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE updates SET summary = ?2 WHERE id = ?1 AND summary IS NULL",
+            params![id, summary],
+        )?;
+        Ok(())
+    }
+
     /// Newest-first update metadata, optionally for one document and before an id.
-    pub fn log(&self, doc: Option<&str>, before: Option<i64>, limit: usize) -> Result<Vec<UpdateMeta>> {
+    pub fn log(
+        &self,
+        doc: Option<&str>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<UpdateMeta>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {UPDATE_META_COLS} FROM updates
              WHERE (?1 IS NULL OR doc = ?1) AND id < ?2 ORDER BY id DESC LIMIT ?3"
         ))?;
-        let rows = stmt.query_map(params![doc, before.unwrap_or(i64::MAX), limit as i64], update_meta)?;
+        let rows = stmt.query_map(
+            params![doc, before.unwrap_or(i64::MAX), limit as i64],
+            update_meta,
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn update_meta(&self, id: i64) -> Result<Option<UpdateMeta>> {
         Ok(self
             .conn
-            .query_row(&format!("SELECT {UPDATE_META_COLS} FROM updates WHERE id = ?1"), params![id], update_meta)
+            .query_row(
+                &format!("SELECT {UPDATE_META_COLS} FROM updates WHERE id = ?1"),
+                params![id],
+                update_meta,
+            )
             .optional()?)
     }
 
@@ -509,14 +590,18 @@ impl Store {
 
     /// Every document that ever had content, including deleted ones.
     pub fn all_doc_paths(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT doc FROM updates ORDER BY doc")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT doc FROM updates ORDER BY doc")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Everyone who has ever written to the project, keyed by author id.
     pub fn authors(&self) -> Result<std::collections::HashMap<String, Author>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT author_id, author_kind, author_name FROM updates")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT author_id, author_kind, author_name FROM updates")?;
         let rows = stmt.query_map([], |r| author_from(r, 0))?;
         let mut map = std::collections::HashMap::new();
         for a in rows {
@@ -560,7 +645,8 @@ impl Store {
             )?;
         }
         self.log_change("checkpoint", &uid, None)?;
-        self.checkpoint(&id.to_string())?.ok_or_else(|| Error::NotFound(name.into()))
+        self.checkpoint(&id.to_string())?
+            .ok_or_else(|| Error::NotFound(name.into()))
     }
 
     /// The CRDT state of `doc` at a checkpoint (None: not in that checkpoint,
@@ -585,7 +671,10 @@ impl Store {
     }
 
     pub fn set_checkpoint_commit(&self, id: i64, sha: &str) -> Result<()> {
-        self.conn.execute("UPDATE checkpoints SET git_commit = ?2 WHERE id = ?1", params![id, sha])?;
+        self.conn.execute(
+            "UPDATE checkpoints SET git_commit = ?2 WHERE id = ?1",
+            params![id, sha],
+        )?;
         Ok(())
     }
 
@@ -593,7 +682,11 @@ impl Store {
     pub fn checkpoint(&self, name_or_id: &str) -> Result<Option<Checkpoint>> {
         let by_name = self
             .conn
-            .query_row(&format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE name = ?1"), params![name_or_id], checkpoint)
+            .query_row(
+                &format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE name = ?1"),
+                params![name_or_id],
+                checkpoint,
+            )
             .optional()?;
         if by_name.is_some() {
             return Ok(by_name);
@@ -601,21 +694,34 @@ impl Store {
         match name_or_id.parse::<i64>() {
             Ok(id) => Ok(self
                 .conn
-                .query_row(&format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE id = ?1"), params![id], checkpoint)
+                .query_row(
+                    &format!("SELECT {CHECKPOINT_COLS} FROM checkpoints WHERE id = ?1"),
+                    params![id],
+                    checkpoint,
+                )
                 .optional()?),
             Err(_) => Ok(None),
         }
     }
 
     pub fn checkpoints(&self) -> Result<Vec<Checkpoint>> {
-        let mut stmt = self.conn.prepare(&format!("SELECT {CHECKPOINT_COLS} FROM checkpoints ORDER BY created_at DESC, id DESC"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHECKPOINT_COLS} FROM checkpoints ORDER BY created_at DESC, id DESC"
+        ))?;
         let rows = stmt.query_map([], checkpoint)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // ---- proposals -------------------------------------------------------
 
-    pub fn insert_proposal(&self, doc: &str, old: &str, new: &str, rationale: &str, author: &Author) -> Result<Proposal> {
+    pub fn insert_proposal(
+        &self,
+        doc: &str,
+        old: &str,
+        new: &str,
+        rationale: &str,
+        author: &Author,
+    ) -> Result<Proposal> {
         let uid = new_uid();
         let now = now_ms();
         self.conn.execute(
@@ -630,7 +736,11 @@ impl Store {
 
     pub fn proposal(&self, id: i64) -> Result<Proposal> {
         self.conn
-            .query_row(&format!("SELECT {PROPOSAL_COLS} FROM proposals WHERE id = ?1"), params![id], proposal)
+            .query_row(
+                &format!("SELECT {PROPOSAL_COLS} FROM proposals WHERE id = ?1"),
+                params![id],
+                proposal,
+            )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("proposal #{id}")))
     }
@@ -655,7 +765,14 @@ impl Store {
 
     // ---- reviews ---------------------------------------------------------
 
-    pub fn insert_round(&self, title: &str, persona: Option<&str>, venue: Option<&str>, reviewer: &Author, update_id: i64) -> Result<ReviewRound> {
+    pub fn insert_round(
+        &self,
+        title: &str,
+        persona: Option<&str>,
+        venue: Option<&str>,
+        reviewer: &Author,
+        update_id: i64,
+    ) -> Result<ReviewRound> {
         let uid = new_uid();
         let now = now_ms();
         self.conn.execute(
@@ -670,18 +787,29 @@ impl Store {
 
     pub fn round(&self, id: i64) -> Result<ReviewRound> {
         self.conn
-            .query_row(&format!("SELECT {ROUND_COLS} FROM review_rounds WHERE id = ?1"), params![id], round)
+            .query_row(
+                &format!("SELECT {ROUND_COLS} FROM review_rounds WHERE id = ?1"),
+                params![id],
+                round,
+            )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("review round #{id}")))
     }
 
     pub fn rounds(&self) -> Result<Vec<ReviewRound>> {
-        let mut stmt = self.conn.prepare(&format!("SELECT {ROUND_COLS} FROM review_rounds ORDER BY created_at DESC, id DESC"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ROUND_COLS} FROM review_rounds ORDER BY created_at DESC, id DESC"
+        ))?;
         let rows = stmt.query_map([], round)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn finish_round(&self, id: i64, summary: &str, scores: Option<&Scores>) -> Result<ReviewRound> {
+    pub fn finish_round(
+        &self,
+        id: i64,
+        summary: &str,
+        scores: Option<&Scores>,
+    ) -> Result<ReviewRound> {
         let scores = scores.map(serde_json::to_string).transpose()?;
         let now = now_ms();
         self.conn.execute(
@@ -720,7 +848,11 @@ impl Store {
 
     pub fn comment(&self, id: i64) -> Result<ReviewComment> {
         self.conn
-            .query_row(&format!("SELECT {COMMENT_COLS} FROM review_comments WHERE id = ?1"), params![id], comment)
+            .query_row(
+                &format!("SELECT {COMMENT_COLS} FROM review_comments WHERE id = ?1"),
+                params![id],
+                comment,
+            )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("review comment #{id}")))
     }
@@ -735,7 +867,13 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn respond_comment(&self, id: i64, response: &str, status: &str, by: &Author) -> Result<ReviewComment> {
+    pub fn respond_comment(
+        &self,
+        id: i64,
+        response: &str,
+        status: &str,
+        by: &Author,
+    ) -> Result<ReviewComment> {
         self.conn.execute(
             "UPDATE review_comments SET response = ?2, status = ?3, responder_id = ?4, responder_kind = ?5,
              responder_name = ?6, updated_at = ?7 WHERE id = ?1",
@@ -760,7 +898,9 @@ impl Store {
     }
 
     pub fn files(&self) -> Result<Vec<(String, String, bool)>> {
-        let mut stmt = self.conn.prepare("SELECT path, content, deleted FROM project_files ORDER BY path")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, content, deleted FROM project_files ORDER BY path")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

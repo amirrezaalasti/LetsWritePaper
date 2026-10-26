@@ -39,11 +39,14 @@ enum Cmd {
     },
     /// Overview: documents, checkpoints, open reviews and proposals.
     Status,
-    /// Edit sessions, newest first.
+    /// Every change, newest first: who, when, and what changed.
     Log {
         path: Option<String>,
-        #[arg(short = 'n', long, default_value_t = 30)]
+        #[arg(short = 'n', long, default_value_t = 40)]
         limit: usize,
+        /// Group consecutive edits by the same author into sessions.
+        #[arg(long)]
+        sessions: bool,
     },
     /// Word-level, section-aware diff. Versions: now, last, start, #<id>, or a checkpoint name.
     Diff {
@@ -271,19 +274,38 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Last edit: {} by {} ({})", format_ms(e.ended_at), e.author.name, e.author.kind.as_str());
             }
         }
-        Cmd::Log { path, limit } => {
-            let ws = open(&cli, Ownership::Never)?;
-            for e in ws.log(path.as_deref(), *limit)? {
-                println!(
-                    "#{:<6} {}  {:<30} {:<22} +{:<5} -{:<5} {}",
-                    e.last_id,
-                    format_ms(e.ended_at),
-                    format!("{} ({})", e.author.name, e.author.kind.as_str()),
-                    e.doc,
-                    e.added,
-                    e.removed,
-                    e.messages.join("; ")
-                );
+        Cmd::Log { path, limit, sessions } => {
+            let mut ws = open(&cli, Ownership::Never)?;
+            if *sessions {
+                for e in ws.log(path.as_deref(), *limit)? {
+                    println!(
+                        "#{:<6} {}  {:<30} {:<22} +{:<5} -{:<5} {} edits  {}",
+                        e.last_id,
+                        format_ms(e.ended_at),
+                        format!("{} ({})", e.author.name, e.author.kind.as_str()),
+                        e.doc,
+                        e.added,
+                        e.removed,
+                        e.updates,
+                        e.messages.join("; ")
+                    );
+                }
+            } else {
+                for c in ws.changes(path.as_deref(), None, *limit)? {
+                    println!(
+                        "#{:<6} {}  {:<30} {:<22} +{:<5} -{:<5} {}",
+                        c.id,
+                        format_ms(c.created_at),
+                        format!("{} ({})", c.author.name, c.author.kind.as_str()),
+                        c.doc,
+                        c.added,
+                        c.removed,
+                        c.summary
+                    );
+                    if let Some(why) = &c.rationale {
+                        println!("         {why}");
+                    }
+                }
             }
         }
         Cmd::Diff { from, to, path } => {

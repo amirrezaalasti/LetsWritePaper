@@ -8,17 +8,18 @@ other devices.
 
 - **Live co-editing.** Every document is a CRDT (Yjs-compatible, via `yrs`). The editor, agents,
   other tools writing files, and other devices all merge without conflicts.
-- **Version control made for papers.** History is grouped into edit sessions per author.
-  Diffs are word-level and grouped by section. Blame works per character. Named checkpoints
-  and milestones (`submitted`, `rebuttal`, `camera-ready`, `arxiv`) also become git commits
-  crediting every human and agent contributor.
+- **Version control made for papers.** Every edit is its own entry in the change log:
+  who made it, when, and a short description of what changed. History can also be
+  grouped into edit sessions per author. Diffs are word-level and grouped by section.
+  Blame works per character. Named checkpoints and milestones (`submitted`, `rebuttal`,
+  `camera-ready`, `arxiv`) also become git commits crediting every human and agent contributor.
 - **AI agents as first-class co-authors.** A built-in MCP server offers 23 paper-aware tools:
   section context, exact-excerpt edits, suggested edits, compile, review and more. Agent
   edits show up live, attributed to the agent.
-- **The Claude panel.** The app has its own Claude panel, like the VS Code/Cursor extension. It
-  offers one-click Claude Code install, streaming chat that knows your file, section and
-  selection, resumable sessions, and *Continue on another device* through Claude Code's
-  Remote Control.
+- **The assistant panel.** The app has its own chat panel, like the VS Code/Cursor extension.
+  It runs Claude Code, ChatGPT through Codex, or Gemini through Antigravity, each with your
+  own account. Chats know your file, section and selection. Claude chats can also continue
+  on another device through Claude Code's Remote Control.
 - **Skills.** A skill is a `SKILL.md` file of writing or review instructions, bound to sections
   (e.g. `intro*` → `paper-introduction`). 13 skills ship built in, your existing
   `~/.claude/skills` are picked up automatically, and you can add per-paper skills.
@@ -34,15 +35,69 @@ other devices.
 - **Cross-platform.** Written in Rust with a Tauri 2 desktop app for macOS, Windows and Linux,
   plus a `paper` CLI.
 
-## Quick start
+## Website
+
+The public site lives in [`web/`](web/) and is deployed at [letswritepaper.vercel.app](https://letswritepaper.vercel.app). It introduces the app and links to the desktop installers on the latest GitHub release. The Vercel project root is `web`.
+
+```sh
+cd web
+pnpm install
+pnpm dev
+```
+
+The download buttons point at `LetsWritePaper-macos.dmg`, `LetsWritePaper-x64-setup.exe`, and `LetsWritePaper-x64.AppImage` on the latest GitHub release of `GITHUB_REPOSITORY` (default `amirrezaalasti/LetsWritePaper`). A clone of the repository is only for building the app yourself.
+
+## Install
+
+Download the app. Rust, Node, and a clone of this repository are only needed to build it from source.
+
+A version tag such as `v0.1.0` publishes these files. Until that first release exists, the links have nothing to download.
+
+### macOS
+
+[LetsWritePaper-macos.dmg](https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/LetsWritePaper-macos.dmg)
+
+Or:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/amirrezaalasti/LetsWritePaper/main/install.sh | bash
+```
+
+The command downloads the latest release and copies LetsWritePaper into your Applications folder.
+
+### Windows
+
+[LetsWritePaper-x64-setup.exe](https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/LetsWritePaper-x64-setup.exe)
+
+Run that setup wizard. It installs for the current user, adds a Start menu folder, and downloads the WebView2 runtime when Windows needs it.
+
+```powershell
+irm https://raw.githubusercontent.com/amirrezaalasti/LetsWritePaper/main/install.ps1 | iex
+```
+
+### Linux
+
+[LetsWritePaper-x64.AppImage](https://github.com/amirrezaalasti/LetsWritePaper/releases/latest/download/LetsWritePaper-x64.AppImage)
+
+Or:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/amirrezaalasti/LetsWritePaper/main/install.sh | bash
+```
+
+The command installs the AppImage for your user and adds an application menu entry. When a `.deb` or `.rpm` is also on the release and you run the script in a terminal, you can choose the system package instead.
+
+The first time the app opens, a setup wizard asks for the name your edits should be attributed to. It can install [tectonic](https://tectonic-typesetting.github.io/) for LaTeX preview, and Claude Code, Codex, or Antigravity for the assistant panel. Typst preview is already in the app. **Set up this computer…** on the start screen opens that wizard again.
+
+## Building from source
 
 ### Requirements
 
-- Rust 1.89+ (`rustup`), Node 20+ and `pnpm`.
-- For LaTeX preview: [`tectonic`](https://tectonic-typesetting.github.io/) or a TeX
-  distribution with `latexmk`. Typst needs nothing extra.
+- Rust 1.95+ (`rustup`), Node 20+ and `pnpm`. Typst 0.15 needs 1.92, and `yrs` 0.28 uses `if let` guards from 1.95.
+- For LaTeX preview: [`tectonic`](https://tectonic-typesetting.github.io/) (the setup wizard installs it) or a TeX
+  distribution with `latexmk`. Typst preview is built into the desktop app.
 - On Linux, the Tauri system packages: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf`.
-- For the Claude panel: Claude Code (the app can install it for you) and a Claude account or API key.
+- For the assistant panel: Claude Code, Codex, or Antigravity (the setup wizard can install them) and the matching account. Claude can use a Claude account or an API key. ChatGPT uses a ChatGPT login or an OpenAI API key. Gemini uses a Google AI Pro or Ultra account through Antigravity, or a Gemini API key.
 
 ### Desktop app
 
@@ -50,8 +105,10 @@ other devices.
 cd app
 pnpm install
 pnpm tauri dev          # development
-pnpm tauri build        # installers for your platform (dmg/app, msi/exe, deb/rpm/AppImage)
+pnpm tauri build        # dmg, Windows setup wizard, deb, rpm, AppImage
 ```
+
+People installing the app use the downloads above. `bash install.sh` from this repository installs a build in `app/src-tauri/target` when one is there, and otherwise downloads the latest release.
 
 ### CLI
 
@@ -87,15 +144,26 @@ Prompts are exposed as slash commands (`/mcp__paper__write-section`, `/mcp__pape
 `add_review_comment`, `finish_review`, `list_review_comments`, `respond_to_comment`.
 </details>
 
-### The Claude panel
+### The assistant panel
 
-Click **◆ Claude** (⌘/Ctrl+L) in the app. If Claude Code is missing, **Install** runs the
-official installer (`curl -fsSL https://claude.ai/install.sh | bash`, or `install.ps1` on
-Windows), and 🔑 opens a terminal to sign in. Chats run your own Claude Code
-(`claude -p --input-format stream-json …`), connected only to this paper's MCP server.
+Click **◆ Assistant** (⌘/Ctrl+L) in the app. 🔑 asks which assistant to use — Claude, ChatGPT,
+or Gemini — then the account and model. If that assistant's program is missing, **Install**
+runs its official installer. Sign-in opens a terminal: Claude Code for Claude, `codex login`
+for a ChatGPT account, and `agy` for a Google AI Pro or Ultra account. An API key, when you
+choose one, is handed to that program and is not saved in the paper.
 
-- **Modes.** *Paper tools* (default) lets Claude work only through the paper tools and read
-  files. *Paper tools + file edits* also allows its built-in editing tools.
+Claude chats run your own Claude Code (`claude -p --input-format stream-json …`). ChatGPT
+chats run Codex (`codex exec --json`). Gemini chats run Antigravity
+(`agy --input-format stream-json`). Each one is connected to this paper's MCP server, and
+each keeps its own chats. You can switch among them from 🔑.
+
+- **Model.** The model menu lists the models that provider serves. The same alias is a
+  different model on each one: Sonnet is Sonnet 5.5 on Anthropic, Sonnet 4.5 on Bedrock and
+  Agent Platform, and Foundry's Opus alias is Opus 4.6. Changing it restarts the chat.
+- **Modes.** *Paper tools* (default) pre-approves the paper tools and reading files. With Claude,
+  web search and anything else ask you to allow them in the chat. *Paper tools + file edits*
+  also accepts file edits without asking. ChatGPT and Gemini cannot ask in the panel, so
+  Gemini pre-approves its tools and ChatGPT's file-edit mode auto-approves workspace edits.
 - **Context.** Each message carries the open file, cursor section and selection (toggle
   *Editor context*).
 - **Sessions.** Pick an earlier chat from the menu to resume it (`--resume`).
@@ -121,6 +189,26 @@ In the app, go to **⇄ Share**:
   ```
 
   Put it behind HTTPS (Caddy, nginx, or a tunnel such as Cloudflare Tunnel or Tailscale).
+
+  To run that container as a small always-on server, use Fly.io (`fly.toml`).
+  A 256 MB machine is about $2.20/month in Ashburn and a little more in Amsterdam,
+  plus about $0.15 for 1 GB of disk. HTTPS is included on `https://<app>.fly.dev`.
+  Skip a dedicated IPv4 address; that adds $2/month. The Fly trial stops the
+  process after 5 minutes and only includes 2 machine-hours, so add a card
+  before anyone shares a paper. Sleeping free hosts (Render’s free instance,
+  Heroku Eco) drop live edits as soon as the process stops.
+
+  ```sh
+  fly auth login
+  fly launch --copy-config --no-deploy   # creates the app; change `app` in fly.toml if the name is taken
+  fly secrets set PAPER_RELAY_SECRET="$(openssl rand -hex 16)"
+  fly deploy
+  ```
+
+  A $0 machine that stays up is Google Cloud’s always-free `e2-micro` (one VM,
+  30 GB disk, 1 GB outbound per month, in `us-central1`, `us-east1`, or
+  `us-west1`). New accounts also get $300 for 90 days. You install Docker and
+  put Caddy in front of port 8787 yourself.
 
 On the other device, use **Join a shared paper…** in the app, or run
 `paper join '<link>' [dir]` and then `paper watch`. Every copy keeps its full history, works
@@ -151,7 +239,8 @@ global = ["clarity-editing", "latex-hygiene"]
 ## Version control
 
 ```sh
-paper log                      # edit sessions: who (human/agent), what, why
+paper log                      # every change: who, when, and what changed
+paper log --sessions           # the same edits grouped into sessions per author
 paper diff draft-1 now         # word-level, grouped by section
 paper blame main.tex
 paper checkpoint submitted-v1 -m "NeurIPS submission" --milestone submitted
@@ -172,6 +261,7 @@ paper review letter > response.md
 | `crates/paper-sync` | Relay server and sync client |
 | `crates/paper-cli` | The `paper` command |
 | `app/` | Tauri 2 desktop app (Rust backend in `src-tauri`, TypeScript + CodeMirror frontend) |
+| `web/` | Public site: introduction and downloads, deployed on Vercel |
 | `skills/` | Bundled skills (embedded at build time) |
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the pieces fit together.
@@ -182,11 +272,20 @@ This is an early (0.1) version.
 
 - No SyncTeX jump between the PDF and the source yet. LaTeX preview re-renders the whole PDF.
 - The relay speaks plain HTTP. Use HTTPS in front of it for anything beyond a trusted LAN.
-- The Claude panel drives the Claude Code CLI installed on your machine, with your own
-  account. If you plan to distribute builds to other people, review Anthropic's terms on
-  offering claude.ai login in third-party products; API-key login is the safe default.
+- The assistant panel drives the Claude Code, Codex, or Antigravity CLI installed on your
+  machine, with your own account. If you plan to distribute builds to other people, review
+  each vendor's terms on offering account login in third-party products; API-key login is
+  the safe default.
 - Tests run on macOS. Windows and Linux builds are covered by CI configuration but haven't
   been exercised by hand yet.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Report security issues the way [SECURITY.md](SECURITY.md) describes.
+
+## License
+
+Licensed under the [MIT license](LICENSE).
 
 ## Development
 

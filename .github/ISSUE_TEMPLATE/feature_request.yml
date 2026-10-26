@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a change to writing, review, sync, or install.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do in a paper, and where does LetsWritePaper fall short?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should change, and how would you know it worked?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Editor
+        - Preview
+        - History or review
+        - Agents or skills
+        - Sync
+        - Install
+        - Other
+    validations:
+      required: true

@@ -4,4 +4,10 @@ node_modules/
 /app/src-tauri/gen
 .paper/owner.lock
 .DS_Store
+Thumbs.db
 .paper/remote.json
+.env
+.env.*
+!.env.example
+*.pem
+.idea/

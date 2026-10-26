@@ -54,7 +54,12 @@ pub struct AppliedSkill {
 
 /// Parse a `SKILL.md`: YAML-ish frontmatter (scalars, quoted strings, inline
 /// and block lists, folded/literal block scalars) followed by a Markdown body.
-pub fn parse_skill_md(text: &str, fallback_name: &str, source: SkillSource, path: Option<PathBuf>) -> Skill {
+pub fn parse_skill_md(
+    text: &str,
+    fallback_name: &str,
+    source: SkillSource,
+    path: Option<PathBuf>,
+) -> Skill {
     let mut fields: BTreeMap<String, String> = BTreeMap::new();
     let mut lists: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut body = text;
@@ -62,31 +67,51 @@ pub fn parse_skill_md(text: &str, fallback_name: &str, source: SkillSource, path
     if let Some(rest) = normalized.strip_prefix("---") {
         if let Some(end) = rest.find("\n---") {
             let front = &rest[..end];
-            body = rest[end + 4..].trim_start_matches(['-', '\r']).trim_start_matches('\n');
+            body = rest[end + 4..]
+                .trim_start_matches(['-', '\r'])
+                .trim_start_matches('\n');
             let lines: Vec<&str> = front.lines().collect();
             let mut i = 0;
             while i < lines.len() {
                 let line = lines[i];
                 i += 1;
-                if line.starts_with([' ', '\t']) || line.trim().is_empty() || line.trim_start().starts_with('#') {
+                if line.starts_with([' ', '\t'])
+                    || line.trim().is_empty()
+                    || line.trim_start().starts_with('#')
+                {
                     continue;
                 }
-                let Some((key, value)) = line.split_once(':') else { continue };
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
                 let key = key.trim().to_string();
                 let value = value.trim();
                 // Indented continuation lines belong to this key.
                 let mut cont = vec![];
-                while i < lines.len() && (lines[i].starts_with([' ', '\t']) || lines[i].trim().is_empty()) {
+                while i < lines.len()
+                    && (lines[i].starts_with([' ', '\t']) || lines[i].trim().is_empty())
+                {
                     cont.push(lines[i].trim());
                     i += 1;
                 }
                 if value.starts_with('[') {
                     let inner = value.trim_start_matches('[').trim_end_matches(']');
-                    lists.insert(key, inner.split(',').map(unquote).filter(|s| !s.is_empty()).collect());
+                    lists.insert(
+                        key,
+                        inner
+                            .split(',')
+                            .map(unquote)
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                    );
                 } else if value.is_empty() && cont.iter().any(|c| c.starts_with('-')) {
                     lists.insert(
                         key,
-                        cont.iter().filter_map(|c| c.strip_prefix('-')).map(unquote).filter(|s| !s.is_empty()).collect(),
+                        cont.iter()
+                            .filter_map(|c| c.strip_prefix('-'))
+                            .map(unquote)
+                            .filter(|s| !s.is_empty())
+                            .collect(),
                     );
                 } else if value.starts_with('>') || value.starts_with('|') {
                     let sep = if value.starts_with('>') { " " } else { "\n" };
@@ -102,10 +127,18 @@ pub fn parse_skill_md(text: &str, fallback_name: &str, source: SkillSource, path
         }
     }
     Skill {
-        name: fields.remove("name").filter(|s| !s.is_empty()).unwrap_or_else(|| fallback_name.to_string()),
+        name: fields
+            .remove("name")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback_name.to_string()),
         description: fields.remove("description").unwrap_or_default(),
         kind: fields.remove("kind").unwrap_or_else(|| "writing".into()),
-        sections: lists.remove("sections").unwrap_or_default().into_iter().map(|s| s.to_lowercase()).collect(),
+        sections: lists
+            .remove("sections")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.to_lowercase())
+            .collect(),
         body: body.trim().to_string(),
         source,
         path,
@@ -131,7 +164,9 @@ pub fn claude_skills_dir() -> Option<PathBuf> {
 }
 
 fn load_dir(dir: &Path, source: SkillSource) -> Vec<Skill> {
-    let Ok(rd) = std::fs::read_dir(dir) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
     let mut out = vec![];
     for entry in rd.flatten() {
         let md = entry.path().join("SKILL.md");
@@ -157,14 +192,20 @@ impl SkillRegistry {
         }
         if std::env::var_os("PAPER_NO_CLAUDE_SKILLS").is_none() {
             if let Some(dir) = claude_skills_dir() {
-                load_dir(&dir, SkillSource::Claude).into_iter().for_each(|s| reg.insert(s));
+                load_dir(&dir, SkillSource::Claude)
+                    .into_iter()
+                    .for_each(|s| reg.insert(s));
             }
         }
         if let Some(dir) = user_skills_dir() {
-            load_dir(&dir, SkillSource::User).into_iter().for_each(|s| reg.insert(s));
+            load_dir(&dir, SkillSource::User)
+                .into_iter()
+                .for_each(|s| reg.insert(s));
         }
         if let Some(p) = project {
-            load_dir(&p.skills_dir(), SkillSource::Project).into_iter().for_each(|s| reg.insert(s));
+            load_dir(&p.skills_dir(), SkillSource::Project)
+                .into_iter()
+                .for_each(|s| reg.insert(s));
         }
         reg
     }
@@ -194,17 +235,30 @@ impl SkillRegistry {
             if out.iter().any(|a| a.name == name) {
                 return;
             }
-            let description = self.get(name).map(|s| s.description.clone()).unwrap_or_else(|| "(skill not installed)".into());
-            out.push(AppliedSkill { name: name.into(), description, reason });
+            let description = self
+                .get(name)
+                .map(|s| s.description.clone())
+                .unwrap_or_else(|| "(skill not installed)".into());
+            out.push(AppliedSkill {
+                name: name.into(),
+                description,
+                reason,
+            });
         };
         for name in &cfg.global {
             push(name, "global in paper.toml".into(), &mut out);
         }
-        let Some(title) = section.map(|s| s.trim().to_lowercase()) else { return out };
+        let Some(title) = section.map(|s| s.trim().to_lowercase()) else {
+            return out;
+        };
         for (pattern, names) in &cfg.sections {
             if glob_match(&pattern.to_lowercase(), &title) {
                 for name in names {
-                    push(name, format!("paper.toml binds section {pattern:?}"), &mut out);
+                    push(
+                        name,
+                        format!("paper.toml binds section {pattern:?}"),
+                        &mut out,
+                    );
                 }
             }
         }
@@ -214,7 +268,11 @@ impl SkillRegistry {
                     continue;
                 }
                 if let Some(p) = skill.sections.iter().find(|p| glob_match(p, &title)) {
-                    push(&skill.name, format!("matches its section pattern {p:?}"), &mut out);
+                    push(
+                        &skill.name,
+                        format!("matches its section pattern {p:?}"),
+                        &mut out,
+                    );
                 }
             }
         }
@@ -225,7 +283,11 @@ impl SkillRegistry {
 /// Match a section title against a glob, also trying each word-boundary
 /// suffix so `method*` matches "Our Method" and "Proposed Methodology".
 fn glob_match(pattern: &str, title: &str) -> bool {
-    let Ok(glob) = globset::GlobBuilder::new(pattern).case_insensitive(true).literal_separator(false).build() else {
+    let Ok(glob) = globset::GlobBuilder::new(pattern)
+        .case_insensitive(true)
+        .literal_separator(false)
+        .build()
+    else {
         return false;
     };
     let m = glob.compile_matcher();
@@ -240,16 +302,25 @@ fn glob_match(pattern: &str, title: &str) -> bool {
 /// Copy a skill directory (containing `SKILL.md`) into the project, or into the
 /// user directory when `project` is None. Returns the installed skill name.
 pub fn install_skill(src: &Path, project: Option<&Project>) -> Result<String> {
-    let src_md = if src.is_file() { src.to_path_buf() } else { src.join("SKILL.md") };
+    let src_md = if src.is_file() {
+        src.to_path_buf()
+    } else {
+        src.join("SKILL.md")
+    };
     let text = std::fs::read_to_string(&src_md)
         .map_err(|_| Error::Invalid(format!("no SKILL.md found at {}", src.display())))?;
     let src_dir = src_md.parent().unwrap_or(src).to_path_buf();
-    let fallback = src_dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "skill".into());
+    let fallback = src_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "skill".into());
     let skill = parse_skill_md(&text, &fallback, SkillSource::Project, None);
     let name = crate::author::slug(&skill.name);
     let base = match project {
         Some(p) => p.skills_dir(),
-        None => user_skills_dir().ok_or_else(|| Error::Invalid("no user config directory".into()))?,
+        None => {
+            user_skills_dir().ok_or_else(|| Error::Invalid("no user config directory".into()))?
+        }
     };
     let dest = base.join(&name);
     std::fs::create_dir_all(&dest)?;
@@ -262,11 +333,22 @@ pub fn install_skill(src: &Path, project: Option<&Project>) -> Result<String> {
 }
 
 /// Write a new skill from scratch into the project.
-pub fn create_skill(project: &Project, name: &str, description: &str, kind: &str, sections: &[String], body: &str) -> Result<PathBuf> {
+pub fn create_skill(
+    project: &Project,
+    name: &str,
+    description: &str,
+    kind: &str,
+    sections: &[String],
+    body: &str,
+) -> Result<PathBuf> {
     let name = crate::author::slug(name);
     let dir = project.skills_dir().join(&name);
     std::fs::create_dir_all(&dir)?;
-    let sections = sections.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ");
+    let sections = sections
+        .iter()
+        .map(|s| format!("{s:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     let text = format!(
         "---\nname: {name}\ndescription: {}\nkind: {kind}\nsections: [{sections}]\n---\n\n{}\n",
         description.replace('\n', " "),
@@ -315,15 +397,35 @@ mod tests {
         let reg = SkillRegistry {
             skills: bundled::BUNDLED
                 .iter()
-                .map(|(n, t)| (n.to_string(), parse_skill_md(t, n, SkillSource::Bundled, None)))
+                .map(|(n, t)| {
+                    (
+                        n.to_string(),
+                        parse_skill_md(t, n, SkillSource::Bundled, None),
+                    )
+                })
                 .collect(),
         };
         assert!(reg.get("peer-review").is_some());
-        let mut cfg = SkillsConfig { global: vec!["clarity-editing".into()], ..Default::default() };
-        cfg.sections.insert("related*".into(), vec!["my-custom".into()]);
-        let names: Vec<_> = reg.for_section(&cfg, Some("Introduction")).into_iter().map(|a| a.name).collect();
+        let mut cfg = SkillsConfig {
+            global: vec!["clarity-editing".into()],
+            ..Default::default()
+        };
+        cfg.sections
+            .insert("related*".into(), vec!["my-custom".into()]);
+        let names: Vec<_> = reg
+            .for_section(&cfg, Some("Introduction"))
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
         assert_eq!(names, ["clarity-editing", "paper-introduction"]);
-        let names: Vec<_> = reg.for_section(&cfg, Some("Related Work")).into_iter().map(|a| a.name).collect();
-        assert!(names.contains(&"my-custom".to_string()) && names.contains(&"paper-related-work".to_string()));
+        let names: Vec<_> = reg
+            .for_section(&cfg, Some("Related Work"))
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            names.contains(&"my-custom".to_string())
+                && names.contains(&"paper-related-work".to_string())
+        );
     }
 }

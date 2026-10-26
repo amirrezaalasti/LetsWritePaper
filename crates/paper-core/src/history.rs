@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::author::Author;
 use crate::outline::{outline, section_at};
 use crate::store::UpdateMeta;
-use crate::textdiff::{word_hunks, word_stats, Hunk};
+use crate::textdiff::{compute_edits, word_hunks, word_stats, Edit, Hunk};
 
 /// Consecutive updates by the same author to the same document within this
 /// window are shown as one entry (one "edit session").
@@ -25,6 +25,113 @@ pub struct LogEntry {
     pub updates: usize,
     pub started_at: i64,
     pub ended_at: i64,
+}
+
+/// One stored edit, with a readable description of what changed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Change {
+    pub id: i64,
+    pub doc: String,
+    pub author: Author,
+    /// What the text change was, e.g. `§ Method: "SGD" → "Adam"`.
+    pub summary: String,
+    /// Why, when the author wrote a rationale. Absent for ordinary typing.
+    pub rationale: Option<String>,
+    pub added: i64,
+    pub removed: i64,
+    pub created_at: i64,
+}
+
+/// One-line description of the difference between two versions of a document.
+pub fn summarize_change(path: &str, before: &str, after: &str) -> String {
+    if before == after {
+        return "no visible text change".into();
+    }
+    let edits = compute_edits(before, after);
+    summarize_edits(path, before, after, &edits)
+}
+
+/// `edits` are the result of [`compute_edits`] on `before` and `after`.
+pub fn summarize_edits(path: &str, before: &str, after: &str, edits: &[Edit]) -> String {
+    if before.is_empty() && !after.is_empty() {
+        let words = after.split_whitespace().count();
+        return format!("created the document ({words} words)");
+    }
+    if after.is_empty() && !before.is_empty() {
+        return "cleared the document".into();
+    }
+    if edits.is_empty() {
+        let (added, removed) = word_stats(before, after);
+        return format!("changed the text (+{added} / −{removed} words)");
+    }
+    let sections_of = outline(path, before);
+    let mut sections: Vec<String> = vec![];
+    let mut parts: Vec<String> = vec![];
+    for edit in edits {
+        let at = edit.start.min(before.len().saturating_sub(1));
+        if let Some(title) = section_at(&sections_of, at).map(|s| s.title.clone()) {
+            if !sections.contains(&title) {
+                sections.push(title);
+            }
+        }
+        if parts.len() < 2 {
+            let part = describe_edit(before, edit);
+            if parts.last().map(|p| p == &part).unwrap_or(false) {
+                continue;
+            }
+            parts.push(part);
+        }
+    }
+    let shown = parts.len();
+    let extra = edits.len().saturating_sub(shown);
+    let mut body = parts.join("; ");
+    if extra > 0 {
+        body.push_str(&format!(" · +{extra} more"));
+    }
+    if sections.is_empty() {
+        body
+    } else {
+        let label = sections
+            .iter()
+            .take(3)
+            .map(|s| format!("§ {s}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = sections.len().saturating_sub(3);
+        if more > 0 {
+            format!("{label} +{more}: {body}")
+        } else {
+            format!("{label}: {body}")
+        }
+    }
+}
+
+fn describe_edit(before: &str, edit: &Edit) -> String {
+    let end = edit.end.min(before.len()).max(edit.start.min(before.len()));
+    let start = edit.start.min(end);
+    let deleted = snippet(&before[start..end]);
+    let inserted = snippet(&edit.insert);
+    match (deleted, inserted) {
+        (None, None) => "adjusted whitespace".into(),
+        (None, Some(ins)) => format!("added {ins}"),
+        (Some(del), None) => format!("removed {del}"),
+        (Some(del), Some(ins)) => format!("{del} → {ins}"),
+    }
+}
+
+/// Collapse whitespace and cap the length. Empty (or whitespace-only) text is `None`.
+fn snippet(text: &str) -> Option<String> {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    const MAX: usize = 64;
+    let count = flat.chars().count();
+    let mut short: String = flat.chars().take(MAX).collect();
+    if count > MAX {
+        short.push('…');
+    }
+    Some(format!("\"{short}\""))
 }
 
 /// Group newest-first update metadata into edit sessions (newest first).
@@ -142,18 +249,33 @@ pub fn diff_doc(path: &str, old: Option<&str>, new: Option<&str>) -> Option<DocD
             .map(|s| s.text.matches('\n').count())
             .sum();
         let section = if new.is_empty() {
-            let byte = old_line_starts.get(hunk.old_line - 1 + lead).copied().unwrap_or(0);
+            let byte = old_line_starts
+                .get(hunk.old_line - 1 + lead)
+                .copied()
+                .unwrap_or(0);
             section_at(&old_outline, byte).map(|s| s.title.clone())
         } else {
-            let byte = new_line_starts.get(hunk.new_line - 1 + lead).copied().unwrap_or(0);
+            let byte = new_line_starts
+                .get(hunk.new_line - 1 + lead)
+                .copied()
+                .unwrap_or(0);
             section_at(&new_outline, byte).map(|s| s.title.clone())
         };
         match sections.last_mut() {
             Some(s) if s.section == section => s.hunks.push(hunk),
-            _ => sections.push(SectionChange { section, hunks: vec![hunk] }),
+            _ => sections.push(SectionChange {
+                section,
+                hunks: vec![hunk],
+            }),
         }
     }
-    Some(DocDiff { path: path.into(), status: status.into(), words_added, words_removed, sections })
+    Some(DocDiff {
+        path: path.into(),
+        status: status.into(),
+        words_added,
+        words_removed,
+        sections,
+    })
 }
 
 /// Plain-text rendering of diffs for terminals and agents.
@@ -163,9 +285,15 @@ pub fn render_diffs(diffs: &[DocDiff]) -> String {
     }
     let mut out = String::new();
     for d in diffs {
-        out.push_str(&format!("=== {} ({}, +{} / -{} words)\n", d.path, d.status, d.words_added, d.words_removed));
+        out.push_str(&format!(
+            "=== {} ({}, +{} / -{} words)\n",
+            d.path, d.status, d.words_added, d.words_removed
+        ));
         for s in &d.sections {
-            out.push_str(&format!("--- § {}\n", s.section.as_deref().unwrap_or("(preamble)")));
+            out.push_str(&format!(
+                "--- § {}\n",
+                s.section.as_deref().unwrap_or("(preamble)")
+            ));
             out.push_str(&crate::textdiff::render_word_diff(&s.hunks));
         }
         out.push('\n');
@@ -181,7 +309,10 @@ mod tests {
     fn parses_refs() {
         assert_eq!(VersionRef::parse("HEAD"), VersionRef::Now);
         assert_eq!(VersionRef::parse("#42"), VersionRef::Update(42));
-        assert_eq!(VersionRef::parse("submitted-v1"), VersionRef::Checkpoint("submitted-v1".into()));
+        assert_eq!(
+            VersionRef::parse("submitted-v1"),
+            VersionRef::Checkpoint("submitted-v1".into())
+        );
     }
 
     #[test]
@@ -192,5 +323,32 @@ mod tests {
         assert_eq!(d.sections.len(), 1);
         assert_eq!(d.sections[0].section.as_deref(), Some("Method"));
         assert!(render_diffs(&[d]).contains("{+Adam with warmup.+}"));
+    }
+
+    #[test]
+    fn summarizes_a_replacement_in_its_section() {
+        let old = "\\section{Intro}\nWe use a small model.\n\\section{Method}\nSGD.\n";
+        let new = "\\section{Intro}\nWe use a small model.\n\\section{Method}\nAdam with warmup.\n";
+        let s = summarize_change("main.tex", old, new);
+        assert!(s.contains("§ Method"), "{s}");
+        assert!(s.contains("\"SGD\""), "{s}");
+        assert!(s.contains("\"Adam with warmup\""), "{s}");
+    }
+
+    #[test]
+    fn summarizes_an_insertion_and_a_new_document() {
+        let old = "\\section{Experiments}\n\n";
+        let new = "\\section{Experiments}\nAccuracy improves by 3 points.\n";
+        let s = summarize_change("main.tex", old, new);
+        assert!(s.starts_with("§ Experiments: added "), "{s}");
+        assert!(s.contains("Accuracy improves"), "{s}");
+        assert_eq!(
+            summarize_change("main.tex", "", "Hello world.\n"),
+            "created the document (2 words)"
+        );
+        assert_eq!(
+            summarize_change("refs.bib", "same", "same"),
+            "no visible text change"
+        );
     }
 }
