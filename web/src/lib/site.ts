@@ -23,3 +23,12 @@ export function siteUrl(): URL {
 
 export const description =
   "An editor for academic papers. Humans and agents edit the same LaTeX or Typst paper, and every change keeps who made it, when, and why.";
+
+/** The maintainer, for investment and development enquiries. */
+export const maintainer = {
+  name: "Amirreza Alasti",
+  email: "amirrezaalasti@gmail.com",
+  website: "https://www.amirrezaalasti.de/",
+  linkedin: "https://www.linkedin.com/in/amirreza-alasti-61450b1aa/",
+  github: "https://github.com/amirrezaalasti",
+};

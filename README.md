@@ -35,6 +35,28 @@ other devices.
 - **Cross-platform.** Written in Rust with a Tauri 2 desktop app for macOS, Windows and Linux,
   plus a `paper` CLI.
 
+## See it work
+
+Recorded in the desktop app on a sample Typst paper. The agent edits go through the same MCP tools Claude Code uses.
+
+**An agent edits the paper live.** Claude Code changes the Method section through MCP. The editor, the change log (with the agent's reason) and the preview update as it happens.
+
+![Claude Code editing the paper live through MCP](web/public/media/agent-live.gif)
+
+**Typst preview while you type.**
+
+![Typing in the editor while the Typst preview updates](web/public/media/typing.gif)
+
+**Accepting an agent's suggested edit** from the review panel, next to the reviewer comments it answers.
+
+![Accepting a suggested edit in the review panel](web/public/media/accept-suggestion.gif)
+
+| | |
+|---|---|
+| ![Editor with section skills and live preview](web/public/media/editor.webp) Editor, section skills and preview | ![Change log](web/public/media/history.webp) Change log: who, what and why |
+| ![Blame](web/public/media/blame.webp) Blame, per line, for people and agents | ![Diff by section](web/public/media/diff.webp) Word-level diff by section |
+| ![Peer review](web/public/media/review.webp) Review comments and suggested edits | ![Skills](web/public/media/skills.webp) Writing and review skills |
+
 ## Website
 
 The public site lives in [`web/`](web/) and is deployed at [letswritepaper.vercel.app](https://letswritepaper.vercel.app). It introduces the app and links to the desktop installers on the latest GitHub release. The Vercel project root is `web`.
@@ -285,6 +307,15 @@ This is an early (0.1) version.
   the safe default.
 - Tests run on macOS. Windows and Linux builds are covered by CI configuration but haven't
   been exercised by hand yet.
+
+## Contact
+
+LetsWritePaper is built by Amirreza Alasti. For investment, sponsored features, or development work on or around the app, get in touch:
+
+- Email: [amirrezaalasti@gmail.com](mailto:amirrezaalasti@gmail.com)
+- Website: [amirrezaalasti.de](https://www.amirrezaalasti.de/)
+- LinkedIn: [Amirreza Alasti](https://www.linkedin.com/in/amirreza-alasti-61450b1aa/)
+- GitHub: [@amirrezaalasti](https://github.com/amirrezaalasti)
 
 ## Contributing
 

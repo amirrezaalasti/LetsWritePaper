@@ -19,6 +19,9 @@ export function SiteHeader() {
           <Link href="/download" className="text-muted hover:text-ink">
             Download
           </Link>
+          <Link href="/#contact" className="text-muted hover:text-ink">
+            Contact
+          </Link>
           {source ? (
             <a href={source} className="text-muted hover:text-ink" rel="noopener noreferrer">
               Source

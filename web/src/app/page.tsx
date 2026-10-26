@@ -1,7 +1,9 @@
 import Image, { type StaticImageData } from "next/image";
 import Link from "next/link";
+import { AppDemo } from "@/components/app-demo";
 import { InstallPanel } from "@/components/install-panel";
 import { Manuscript } from "@/components/manuscript";
+import { maintainer } from "@/lib/site";
 import coauthor from "@/assets/coauthor.webp";
 import history from "@/assets/history.webp";
 import review from "@/assets/review.webp";
@@ -94,15 +96,17 @@ export default function HomePage() {
               Download the app
             </Link>
             <a
-              href="#product"
+              href="#demo"
               className="inline-flex h-12 items-center justify-center rounded-full border border-line-strong bg-sheet px-6 font-medium hover:border-ink"
             >
-              What it records
+              See it work
             </a>
           </div>
         </div>
         <Manuscript />
       </section>
+
+      <AppDemo />
 
       <section id="product" className="border-t border-line">
         <div className="mx-auto w-full max-w-6xl px-5 py-16 lg:py-24">
@@ -193,6 +197,39 @@ export default function HomePage() {
               First launch, and building it yourself
             </Link>
           </p>
+        </div>
+      </section>
+
+      <section id="contact" className="border-t border-line bg-sheet/60">
+        <div className="mx-auto grid w-full max-w-6xl gap-10 px-5 py-16 lg:grid-cols-2 lg:py-24">
+          <div>
+            <h2 className="font-serif text-4xl tracking-tight">Investment and development</h2>
+            <p className="mt-4 max-w-xl text-lg leading-8 text-muted">
+              LetsWritePaper is built by {maintainer.name}. To invest, fund a feature, or build something on top of the
+              app, write to me directly.
+            </p>
+          </div>
+          <dl className="grid content-start gap-5 text-base">
+            {[
+              { label: "Email", href: `mailto:${maintainer.email}`, text: maintainer.email },
+              { label: "Website", href: maintainer.website, text: "amirrezaalasti.de" },
+              { label: "LinkedIn", href: maintainer.linkedin, text: "Amirreza Alasti" },
+              { label: "GitHub", href: maintainer.github, text: "amirrezaalasti" },
+            ].map((item) => (
+              <div key={item.label} className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 border-t border-line pt-4">
+                <dt className="font-mono text-xs tracking-wide text-muted uppercase">{item.label}</dt>
+                <dd>
+                  <a
+                    href={item.href}
+                    className="break-all text-accent-ink underline decoration-line underline-offset-4 hover:text-ink"
+                    rel={item.href.startsWith("http") ? "noopener noreferrer" : undefined}
+                  >
+                    {item.text}
+                  </a>
+                </dd>
+              </div>
+            ))}
+          </dl>
         </div>
       </section>
     </main>
