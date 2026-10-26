@@ -1971,6 +1971,7 @@ fn spawn_agy_child(
 /// Read an Antigravity stream and emit it as panel events.
 /// `generation` belongs to this process. A newer one means the chat restarted
 /// on purpose, so this reader must not tell the panel the chat exited.
+#[allow(clippy::too_many_arguments)]
 fn watch_output(
     app: &AppHandle,
     chat_id: &str,
