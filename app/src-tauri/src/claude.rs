@@ -35,6 +35,14 @@ your name. Never invent citations: cite only keys present in the project's .bib 
 Keep replies short; the paper itself is where your work goes. \
 WebSearch, WebFetch and any other tool that is not pre-approved raise an allow prompt in this chat; wait for the user's choice instead of saying you cannot.";
 
+const GEMINI_PROMPT: &str = "You are working inside LetsWritePaper, a desktop editor for academic papers, as the user's co-author. \
+Use the paper MCP server for everything about the paper: project_overview to orient yourself; section_context before \
+changing a section (follow the skills it returns and consider open review comments); edit_document with exact old_text \
+and a clear rationale for focused edits; propose_edit when the user asked for suggestions or the change is substantive; \
+compile to check the paper still builds. Call those tools directly. The user sees your edits appear live in their editor and in the history under \
+your name. Never invent citations: cite only keys present in the project's .bib files, otherwise write TODO. \
+Keep replies short; the paper itself is where your work goes.";
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ClaudeStatus {
     pub installed: bool,
@@ -1056,10 +1064,10 @@ impl ClaudeChats {
     }
 }
 
-fn message_text(text: &str, ctx: &EditorContext, instructions: bool) -> String {
+fn message_text(text: &str, ctx: &EditorContext, instructions: Option<&str>) -> String {
     let mut content = String::new();
-    if instructions {
-        content.push_str(SYSTEM_PROMPT);
+    if let Some(prompt) = instructions {
+        content.push_str(prompt);
         content.push_str("\n\n");
     }
     let mentions = mention_block(ctx);
@@ -1514,10 +1522,15 @@ fn prompt_for(assistant: &str, text: &str, ctx: &EditorContext, files: &[Prepare
     } else {
         text
     };
+    let instructions = match assistant {
+        "claude" => None,
+        "gemini" => Some(GEMINI_PROMPT),
+        _ => Some(SYSTEM_PROMPT),
+    };
     let mut body = if slash {
         text.trim().to_string()
     } else {
-        message_text(spoken, ctx, assistant != "claude")
+        message_text(spoken, ctx, instructions)
     };
     if !slash {
         body.push_str(&attachment_note(files));
@@ -1839,8 +1852,27 @@ fn watch_output(
     let root2 = root.to_path_buf();
     std::thread::spawn(move || {
         let mut decoder = crate::assistants::AgyDecoder::default();
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            if buf.is_empty() {
+                continue;
+            }
+            // One bad byte used to end the whole chat, so the reply never arrived.
+            let line = String::from_utf8_lossy(&buf);
+            let Ok(event) = serde_json::from_str::<Value>(line.as_ref()) else {
                 continue;
             };
             if let Some(sid) = event
@@ -2414,7 +2446,7 @@ mod tests {
                 ],
                 ..EditorContext::default()
             },
-            false,
+            None,
         );
         assert!(tagged.contains("section \"Introduction\" in main.tex near line 12"), "{tagged}");
         assert!(tagged.contains("prior work"), "{tagged}");

@@ -1699,6 +1699,19 @@ export class ClaudePanel {
     }
   }
 
+  private finishStream(full: string) {
+    const id = this.currentMsg;
+    if (!id) return;
+    const bubble = this.bubbles.get(id);
+    if (!bubble) return;
+    const have = bubble.text.trim();
+    const want = full.trim();
+    if (want.length > have.length && (have.length === 0 || want.startsWith(have))) {
+      bubble.text = full;
+      this.queueRender(id);
+    }
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private onResult(ev: any) {
     const parts = [ev.is_error ? "Stopped with an error" : "Done"];
@@ -1706,12 +1719,16 @@ export class ClaudePanel {
     if (ev.num_turns) parts.push(`${ev.num_turns} turns`);
     if (ev.duration_ms) parts.push(`${(ev.duration_ms / 1000).toFixed(1)}s`);
     this.note(parts.join(" · "));
-    if (!ev.is_error && typeof ev.result === "string" && ev.result.trim() && !this.streamedThisTurn) {
-      const id = `result-${crypto.randomUUID()}`;
-      const bubble = this.bubble(id);
-      bubble.text = ev.result;
-      this.streamedThisTurn = true;
-      this.queueRender(id);
+    if (!ev.is_error && typeof ev.result === "string" && ev.result.trim()) {
+      if (!this.streamedThisTurn) {
+        const id = `result-${crypto.randomUUID()}`;
+        const bubble = this.bubble(id);
+        bubble.text = ev.result;
+        this.streamedThisTurn = true;
+        this.queueRender(id);
+      } else {
+        this.finishStream(ev.result);
+      }
     }
     if (ev.is_error && typeof ev.result === "string") {
       if (/log ?in|auth/i.test(ev.result)) this.loginNeeded(ev.result);

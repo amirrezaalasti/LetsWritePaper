@@ -755,6 +755,20 @@ fn codex_tool_output(item: &Value) -> (String, bool) {
     (text, false)
 }
 
+/// `call_mcp_tool` is the CLI's wrapper. The panel should show the paper tool.
+fn mcp_tool_name(name: &str, info: &Value) -> String {
+    if name != "call_mcp_tool" {
+        return name.to_string();
+    }
+    info.pointer("/parameters/ToolName")
+        .or_else(|| info.pointer("/parameters/toolName"))
+        .or_else(|| info.pointer("/parameters/tool_name"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(name)
+        .to_string()
+}
+
 fn paper_tool_name(name: &str) -> String {
     const TOOLS: &[&str] = &[
         "project_overview",
@@ -824,6 +838,9 @@ fn value_text(value: &Value) -> String {
 pub struct AgyDecoder {
     step: Option<i64>,
     saw_delta: bool,
+    /// Last text chunk applied for `step`. A finished step sometimes repeats
+    /// that chunk; a new chunk on the same step is the rest of the reply.
+    last_delta: Option<String>,
 }
 
 impl AgyDecoder {
@@ -868,6 +885,12 @@ impl AgyDecoder {
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| "Gemini stopped with an error".into());
                     ev["result"] = json!(message);
+                } else if let Some(response) = result
+                    .get("response")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    ev["result"] = json!(response);
                 }
                 if let Some(id) = result.get("conversation_id").and_then(Value::as_str) {
                     ev["session_id"] = json!(id);
@@ -887,39 +910,47 @@ impl AgyDecoder {
             if self.step != index {
                 self.step = index;
                 self.saw_delta = false;
-                out.push(json!({
-                    "type": "stream_event",
-                    "event": {
-                        "type": "message_start",
-                        "message": { "id": format!("agy-{}", index.unwrap_or(0)) }
-                    }
-                }));
+                self.last_delta = None;
             }
             if let Some(delta) = step
                 .get("text_delta")
                 .and_then(Value::as_str)
                 .filter(|d| !d.is_empty())
             {
-                if !(state == "DONE" && self.saw_delta) {
-                    self.saw_delta = true;
+                // The finished step repeats the chunk it already streamed.
+                // A different chunk is the rest of the sentence.
+                if self.last_delta.as_deref() == Some(delta) {
+                    return out;
+                }
+                if !self.saw_delta {
                     out.push(json!({
                         "type": "stream_event",
-                        "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": delta } }
+                        "event": {
+                            "type": "message_start",
+                            "message": { "id": format!("agy-{}", index.unwrap_or(0)) }
+                        }
                     }));
                 }
+                self.saw_delta = true;
+                self.last_delta = Some(delta.to_string());
+                out.push(json!({
+                    "type": "stream_event",
+                    "event": { "type": "content_block_delta", "delta": { "type": "text_delta", "text": delta } }
+                }));
             }
             return out;
         }
-        if kind == "tool" && state == "DONE" {
+        if kind == "tool" && (state == "DONE" || state == "ERROR") {
             let info = step.get("tool_info").cloned().unwrap_or_else(|| json!({}));
             let raw = step
                 .get("tool_name")
                 .or_else(|| info.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or("tool");
-            let name = paper_tool_name(raw);
+            let raw = mcp_tool_name(raw, &info);
+            let name = paper_tool_name(&raw);
             let input = info.get("parameters").cloned().unwrap_or_else(|| json!({}));
-            let is_error = info.get("error").is_some_and(|e| !e.is_null());
+            let is_error = state == "ERROR" || info.get("error").is_some_and(|e| !e.is_null());
             let output = if is_error {
                 info.pointer("/error/message")
                     .and_then(Value::as_str)
@@ -1023,6 +1054,20 @@ mod tests {
             again.is_empty(),
             "a repeated done delta is not appended twice"
         );
+        let mut longer = AgyDecoder::default();
+        let head = longer.push(&json!({"event": "step_update", "step_update": {"step_index": 3, "state": "ACTIVE", "step_type": "agent_response", "text_delta": "Hello wo"}}));
+        let tail = longer.push(&json!({"event": "step_update", "step_update": {"step_index": 3, "state": "DONE", "step_type": "agent_response", "text_delta": "rld\n"}}));
+        assert_eq!(head[1]["event"]["delta"]["text"], "Hello wo");
+        assert_eq!(tail.len(), 1, "the finished chunk is the rest of the reply");
+        assert_eq!(tail[0]["event"]["delta"]["text"], "rld\n");
+        let mcp = longer.push(&json!({"event": "step_update", "step_update": {"step_index": 5, "state": "DONE", "step_type": "tool", "tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"ServerName": "paper", "ToolName": "project_overview", "Arguments": {}}, "output": "ok"}}}));
+        assert_eq!(
+            mcp[0]["message"]["content"][0]["name"],
+            "mcp__paper__project_overview"
+        );
+        let ok = longer.push(&json!({"event": "result", "result": {"conversation_id": "c1", "status": "SUCCESS", "response": "Hello world\n", "num_turns": 1}}));
+        assert_eq!(ok[0]["is_error"], false);
+        assert_eq!(ok[0]["result"], "Hello world\n");
         let tool = dec.push(&json!({"event": "step_update", "step_update": {"step_index": 4, "state": "DONE", "step_type": "tool", "tool_name": "edit_document", "tool_info": {"name": "edit_document", "parameters": {"path": "a.tex"}, "output": "edited"}}}));
         assert_eq!(
             tool[0]["message"]["content"][0]["name"],
