@@ -79,6 +79,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: app
       - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
           tagName: ${{ github.ref_name }}
