@@ -94,7 +94,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $src = Get-ChildItem "app/src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          $roots = @("target", "app/src-tauri/target") | Where-Object { Test-Path $_ }
+          $src = Get-ChildItem -Path $roots -Recurse -Filter *-setup.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '[\\/]bundle[\\/]nsis[\\/]' } |
+            Select-Object -First 1
           if (-not $src) { throw "The Windows setup.exe was not built." }
           Copy-Item $src.FullName "LetsWritePaper-x64-setup.exe"
           gh release upload "${{ github.ref_name }}" "LetsWritePaper-x64-setup.exe" --clobber
@@ -103,7 +106,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          dmg=$(find app/src-tauri/target -path '*/bundle/dmg/*.dmg' -print | head -n 1)
+          dmg=$(find target app/src-tauri/target -path '*/bundle/dmg/*.dmg' -print 2>/dev/null | head -n 1)
           if [[ -z "$dmg" ]]; then
             echo "The macOS disk image was not built." >&2
             exit 1
@@ -115,7 +118,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          img=$(find app/src-tauri/target -path '*/bundle/appimage/*.AppImage' -print | head -n 1)
+          img=$(find target app/src-tauri/target -path '*/bundle/appimage/*.AppImage' -print 2>/dev/null | head -n 1)
           if [[ -z "$img" ]]; then
             echo "The AppImage was not built." >&2
             exit 1
