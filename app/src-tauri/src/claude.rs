@@ -541,6 +541,7 @@ impl ClaudeChats {
     /// Start (or resume) a chat. `mode`: `paper` (paper tools and reading are
     /// pre-approved; anything else asks in the chat) or `edits` (also
     /// auto-accepts file edits).
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &self,
         app: &AppHandle,
@@ -719,6 +720,7 @@ impl ClaudeChats {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_agy(
         &self,
         app: &AppHandle,

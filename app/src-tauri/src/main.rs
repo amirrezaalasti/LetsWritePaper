@@ -899,6 +899,7 @@ fn claude_sessions(state: State<AppState>) -> CmdResult<Vec<claude::SessionInfo>
 }
 
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 fn claude_start(
     app: AppHandle,
     state: State<AppState>,
