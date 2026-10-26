@@ -1,0 +1,22 @@
+[package]
+name = "paper-compile"
+description = "Live compilation for LetsWritePaper: Typst in-process, LaTeX via tectonic or latexmk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["typst"]
+typst = ["dep:typst", "dep:typst-layout", "dep:typst-pdf", "dep:typst-svg", "dep:typst-kit", "dep:ureq"]
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+typst = { version = "0.15", optional = true }
+typst-pdf = { version = "0.15", optional = true }
+typst-svg = { version = "0.15", optional = true }
+typst-layout = { version = "0.15", optional = true }
+typst-kit = { version = "0.15", optional = true, features = ["embedded-fonts", "scan-fonts", "system-files"] }
+ureq = { version = "3", optional = true }
+time.workspace = true

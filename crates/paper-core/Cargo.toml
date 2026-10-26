@@ -1,0 +1,24 @@
+[package]
+name = "paper-core"
+description = "Document model, CRDT editing, paper-aware history, skills and peer review for LetsWritePaper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+yrs.workspace = true
+rusqlite.workspace = true
+similar.workspace = true
+uuid.workspace = true
+time.workspace = true
+dirs.workspace = true
+globset.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

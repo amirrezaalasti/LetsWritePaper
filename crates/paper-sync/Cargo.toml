@@ -1,0 +1,18 @@
+[package]
+name = "paper-sync"
+description = "Cross-device sync for LetsWritePaper: a small relay server and client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+paper-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+tiny_http = "0.12"
+ureq = { version = "3", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"

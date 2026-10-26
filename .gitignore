@@ -1,0 +1,7 @@
+/target
+node_modules/
+/app/dist
+/app/src-tauri/gen
+.paper/owner.lock
+.DS_Store
+.paper/remote.json
