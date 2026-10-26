@@ -11,4 +11,5 @@ Thumbs.db
 .env.*
 !.env.example
 *.pem
+app/src-tauri/windows-signing.json
 .idea/

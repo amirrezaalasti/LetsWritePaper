@@ -132,6 +132,39 @@ pnpm tauri build        # dmg, Windows setup wizard, deb, rpm, AppImage
 
 People installing the app use the downloads above. `bash install.sh` from this repository installs a build in `app/src-tauri/target` when one is there, and otherwise downloads the latest release.
 
+### Signed releases
+
+macOS Gatekeeper and Windows SmartScreen warn on unsigned downloads. Nothing inside the app removes those checks. A tagged release signs the installers when the GitHub Actions secrets below are set, and otherwise still publishes an unsigned build.
+
+**macOS.** An Apple Developer Program membership and a Developer ID Application certificate. Notarization uses either an App Store Connect API key or an Apple ID app-specific password.
+
+| Secret | Value |
+|---|---|
+| `APPLE_CERTIFICATE` | Base64 of the exported `.p12` (`openssl base64 -A -in certificate.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | Password for that `.p12` |
+| `APPLE_SIGNING_IDENTITY` | Optional. For example `Developer ID Application: Name (TEAMID)` |
+| `APPLE_API_KEY` | App Store Connect Key ID |
+| `APPLE_API_ISSUER` | App Store Connect issuer ID |
+| `APPLE_API_KEY_P8` | Contents of the downloaded `AuthKey_….p8` file |
+| `APPLE_ID` | Apple ID email, used when the API key secrets are unset |
+| `APPLE_PASSWORD` | App-specific password |
+| `APPLE_TEAM_ID` | Team ID from the membership page |
+
+The API key is used when `APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_KEY_P8` are all set. Otherwise the Apple ID, password, and team ID are required. A certificate without notarization credentials fails the macOS release, because a signed app that was not notarized still fails Gatekeeper.
+
+**Windows.** Azure Artifact Signing, or a `.pfx` code-signing certificate. Azure is the practical choice for a new certificate: since 2023 most new certificates cannot be exported as a file, and SmartScreen reputation is tied to the signing identity. A brand-new identity can still show SmartScreen until that publisher has been downloaded enough. Signing every release with the same identity is what carries the reputation forward.
+
+| Secret | Value |
+|---|---|
+| `AZURE_CLIENT_ID` | App registration client ID |
+| `AZURE_CLIENT_SECRET` | App registration client secret |
+| `AZURE_TENANT_ID` | Directory tenant ID |
+| `AZURE_SIGNING_ENDPOINT` | For example `https://wus2.codesigning.azure.net` |
+| `AZURE_SIGNING_ACCOUNT` | Artifact Signing account name |
+| `AZURE_SIGNING_CERTIFICATE_PROFILE` | Certificate profile name |
+| `WINDOWS_CERTIFICATE` | Base64 of a `.pfx`, used when the Azure secrets are unset |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Password for that `.pfx` |
+
 ### CLI
 
 ```sh

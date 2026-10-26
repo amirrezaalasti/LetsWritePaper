@@ -78,6 +78,126 @@ jobs:
           node-version: 22
       - run: pnpm install --frozen-lockfile
         working-directory: app
+      - name: Prepare macOS signing and notarization
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          write_env() {
+            local name="$1" value="$2"
+            {
+              echo "${name}<<LWP_ENV_EOF"
+              printf '%s\n' "$value"
+              echo "LWP_ENV_EOF"
+            } >> "$GITHUB_ENV"
+          }
+          if [[ -z "${APPLE_CERTIFICATE:-}" || -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+            echo "Apple signing certificate is not configured. Gatekeeper will warn on this macOS build."
+            exit 0
+          fi
+          write_env APPLE_CERTIFICATE "$APPLE_CERTIFICATE"
+          write_env APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
+          if [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+            write_env APPLE_SIGNING_IDENTITY "$APPLE_SIGNING_IDENTITY"
+          fi
+          if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_P8:-}" ]]; then
+            umask 077
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+            write_env APPLE_API_KEY "$APPLE_API_KEY"
+            write_env APPLE_API_ISSUER "$APPLE_API_ISSUER"
+            echo "macOS build will be signed with the Developer ID certificate and notarized with the App Store Connect API key."
+          elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+            write_env APPLE_ID "$APPLE_ID"
+            write_env APPLE_PASSWORD "$APPLE_PASSWORD"
+            write_env APPLE_TEAM_ID "$APPLE_TEAM_ID"
+            echo "macOS build will be signed with the Developer ID certificate and notarized with the Apple ID."
+          else
+            echo "The Apple certificate is set, but notarization credentials are not. Gatekeeper still blocks a signed app that was not notarized." >&2
+            exit 1
+          fi
+      - name: Prepare Windows code signing
+        id: windows-signing
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_SIGNING_CERTIFICATE_PROFILE }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          function Add-GitHubEnv([string]$Name, [string]$Value) {
+            Add-Content -Path $env:GITHUB_ENV -Value "$Name<<LWP_ENV_EOF"
+            Add-Content -Path $env:GITHUB_ENV -Value $Value
+            Add-Content -Path $env:GITHUB_ENV -Value "LWP_ENV_EOF"
+          }
+          $azureReady = -not [string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_ID) `
+            -and -not [string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_SECRET) `
+            -and -not [string]::IsNullOrWhiteSpace($env:AZURE_TENANT_ID) `
+            -and -not [string]::IsNullOrWhiteSpace($env:AZURE_SIGNING_ENDPOINT) `
+            -and -not [string]::IsNullOrWhiteSpace($env:AZURE_SIGNING_ACCOUNT) `
+            -and -not [string]::IsNullOrWhiteSpace($env:AZURE_SIGNING_CERTIFICATE_PROFILE)
+          $pfxReady = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) `
+            -and -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          $windows = $null
+          if ($azureReady) {
+            cargo install artifact-signing-cli
+            if ($LASTEXITCODE -ne 0) { throw "Could not install artifact-signing-cli." }
+            Add-GitHubEnv "AZURE_CLIENT_ID" $env:AZURE_CLIENT_ID.Trim()
+            Add-GitHubEnv "AZURE_CLIENT_SECRET" $env:AZURE_CLIENT_SECRET.Trim()
+            Add-GitHubEnv "AZURE_TENANT_ID" $env:AZURE_TENANT_ID.Trim()
+            $endpoint = $env:AZURE_SIGNING_ENDPOINT.Trim().TrimEnd("/")
+            $account = $env:AZURE_SIGNING_ACCOUNT.Trim()
+            $profile = $env:AZURE_SIGNING_CERTIFICATE_PROFILE.Trim()
+            $windows = @{
+              signCommand = "artifact-signing-cli -e $endpoint -a $account -c $profile -d LetsWritePaper %1"
+            }
+            Write-Host "Windows build will be signed with Azure Artifact Signing."
+          } elseif ($pfxReady) {
+            $dir = Join-Path $env:RUNNER_TEMP "win-cert"
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $pfx = Join-Path $dir "certificate.pfx"
+            $raw = $env:WINDOWS_CERTIFICATE.Trim()
+            if ($raw -match "BEGIN") {
+              $txt = Join-Path $dir "certificate.txt"
+              [IO.File]::WriteAllText($txt, $raw)
+              & certutil -decode $txt $pfx
+              if ($LASTEXITCODE -ne 0) { throw "Could not decode the Windows certificate." }
+            } else {
+              $bytes = [Convert]::FromBase64String(($raw -replace '\s', ''))
+              [IO.File]::WriteAllBytes($pfx, $bytes)
+            }
+            $secure = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure)
+            Remove-Item -Force $pfx
+            $withKey = $imported | Where-Object { $_.HasPrivateKey } | Select-Object -First 1
+            if (-not $withKey) { throw "The Windows certificate imported without a private key." }
+            $windows = @{
+              certificateThumbprint = ($withKey.Thumbprint -replace '\s', '').ToUpperInvariant()
+              digestAlgorithm = "sha256"
+              timestampUrl = "http://timestamp.digicert.com"
+            }
+            Write-Host "Windows build will be signed with the imported code-signing certificate."
+          } else {
+            Write-Host "Windows code-signing credentials are not configured. SmartScreen will warn on this build."
+            exit 0
+          }
+          @{ bundle = @{ windows = $windows } } | ConvertTo-Json -Depth 6 |
+            Set-Content -Path "app/src-tauri/windows-signing.json" -Encoding utf8NoBOM
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "args=--config src-tauri/windows-signing.json"
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -90,7 +210,7 @@ jobs:
           releaseName: LetsWritePaper ${{ github.ref_name }}
           # The publish job below makes the release public after every installer is attached.
           releaseDraft: true
-          args: ${{ matrix.args }}
+          args: ${{ format('{0} {1}', matrix.args, steps.windows-signing.outputs.args) }}
       - name: Attach LetsWritePaper-x64-setup.exe
         if: runner.os == 'Windows'
         env:
@@ -109,10 +229,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          dmg=$(find target app/src-tauri/target -path '*/bundle/dmg/*.dmg' -print 2>/dev/null | head -n 1)
+          set -euo pipefail
+          dmg=$(find target app/src-tauri/target -path '*/bundle/dmg/*.dmg' -print 2>/dev/null | head -n 1 || true)
           if [[ -z "$dmg" ]]; then
             echo "The macOS disk image was not built." >&2
             exit 1
+          fi
+          # The app inside is already notarized. The downloaded file is the disk image, so it needs its own ticket.
+          if [[ -n "${APPLE_API_KEY_PATH:-}" ]]; then
+            xcrun notarytool submit "$dmg" --wait --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER"
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
+          elif [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
+            xcrun notarytool submit "$dmg" --wait --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID"
+            xcrun stapler staple "$dmg"
+            xcrun stapler validate "$dmg"
           fi
           cp "$dmg" LetsWritePaper-macos.dmg
           gh release upload "${{ github.ref_name }}" LetsWritePaper-macos.dmg --clobber
