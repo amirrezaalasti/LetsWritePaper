@@ -1,6 +1,10 @@
+import Image, { type StaticImageData } from "next/image";
 import Link from "next/link";
 import { InstallPanel } from "@/components/install-panel";
 import { Manuscript } from "@/components/manuscript";
+import coauthor from "@/assets/coauthor.webp";
+import history from "@/assets/history.webp";
+import review from "@/assets/review.webp";
 
 const features = [
   {
@@ -54,6 +58,20 @@ const steps = [
   },
 ];
 
+function Illustration({ src, alt }: { src: StaticImageData; alt: string }) {
+  return (
+    <div className="overflow-hidden rounded-sm border border-line bg-sheet shadow-[0_18px_50px_rgba(60,40,10,0.06)]">
+      <Image
+        src={src}
+        alt={alt}
+        placeholder="blur"
+        sizes="(min-width: 1024px) 34rem, 100vw"
+        className="h-auto w-full"
+      />
+    </div>
+  );
+}
+
 export default function HomePage() {
   return (
     <main>
@@ -88,12 +106,20 @@ export default function HomePage() {
 
       <section id="product" className="border-t border-line">
         <div className="mx-auto w-full max-w-6xl px-5 py-16 lg:py-24">
-          <h2 className="font-serif text-4xl tracking-tight">What the app is for</h2>
-          <p className="mt-4 max-w-2xl text-lg leading-8 text-muted">
-            The desktop app is what you install. The <span className="font-mono text-base text-ink">paper</span> command
-            does the same work from a terminal. Typst preview is built in. LaTeX preview uses tectonic, or latexmk if
-            you already have a TeX distribution.
-          </p>
+          <div className="grid items-center gap-10 lg:grid-cols-2">
+            <div>
+              <h2 className="font-serif text-4xl tracking-tight">What the app is for</h2>
+              <p className="mt-4 max-w-2xl text-lg leading-8 text-muted">
+                The desktop app is what you install. The <span className="font-mono text-base text-ink">paper</span>{" "}
+                command does the same work from a terminal. Typst preview is built in. LaTeX preview uses tectonic, or
+                latexmk if you already have a TeX distribution.
+              </p>
+            </div>
+            <Illustration
+              src={coauthor}
+              alt="A hand with a pen and an AI agent edit the same manuscript page; the human's lines are marked in blue and the agent's in violet."
+            />
+          </div>
           <ol className="mt-12 grid gap-x-12 gap-y-10 md:grid-cols-2">
             {features.map((feature) => (
               <li key={feature.number}>
@@ -109,30 +135,44 @@ export default function HomePage() {
       <section className="border-t border-line bg-sheet/60">
         <div className="mx-auto w-full max-w-6xl px-5 py-16 lg:py-24">
           <h2 className="font-serif text-4xl tracking-tight">What happens to an edit</h2>
-          <ol className="mt-10 grid gap-8 md:grid-cols-2">
-            {steps.map((step, index) => (
-              <li key={step.title} className="border-t border-line pt-4">
-                <p className="font-mono text-xs text-muted">0{index + 1}</p>
-                <h3 className="mt-2 font-serif text-2xl tracking-tight">{step.title}</h3>
-                <p className="mt-2 leading-7 text-muted">{step.body}</p>
-              </li>
-            ))}
-          </ol>
-          <div className="mt-12 grid gap-8 border-t border-line pt-8 md:grid-cols-2">
-            <div>
-              <h3 className="font-serif text-2xl tracking-tight">Preview</h3>
-              <p className="mt-2 leading-7 text-muted">
-                Typst compiles in the app, usually in milliseconds. LaTeX compiles with tectonic or latexmk, and the
-                diagnostics are clickable. The first launch can install tectonic for you.
-              </p>
+          <div className="mt-10 grid items-start gap-10 lg:grid-cols-2">
+            <ol className="grid gap-8 sm:grid-cols-2 lg:grid-cols-1">
+              {steps.map((step, index) => (
+                <li key={step.title} className="border-t border-line pt-4">
+                  <p className="font-mono text-xs text-muted">0{index + 1}</p>
+                  <h3 className="mt-2 font-serif text-2xl tracking-tight">{step.title}</h3>
+                  <p className="mt-2 leading-7 text-muted">{step.body}</p>
+                </li>
+              ))}
+            </ol>
+            <div className="lg:sticky lg:top-24">
+              <Illustration
+                src={history}
+                alt="A timeline of edits, blue for people and violet for agents, with a milestone flag, beside a page showing a word-level diff."
+              />
             </div>
-            <div>
-              <h3 className="font-serif text-2xl tracking-tight">Another computer</h3>
-              <p className="mt-2 leading-7 text-muted">
-                Share a paper on the local network, or through a relay. The other device joins from a link and keeps a
-                full copy that works offline, then merges when it reconnects. The link is the access token, so treat it
-                like a password.
-              </p>
+          </div>
+          <div className="mt-12 grid items-center gap-10 border-t border-line pt-8 lg:grid-cols-2">
+            <Illustration
+              src={review}
+              alt="The same manuscript with anchored review comments open on a laptop, a second laptop, and a tablet, linked to show sync."
+            />
+            <div className="grid gap-8">
+              <div>
+                <h3 className="font-serif text-2xl tracking-tight">Preview</h3>
+                <p className="mt-2 leading-7 text-muted">
+                  Typst compiles in the app, usually in milliseconds. LaTeX compiles with tectonic or latexmk, and the
+                  diagnostics are clickable. The first launch can install tectonic for you.
+                </p>
+              </div>
+              <div>
+                <h3 className="font-serif text-2xl tracking-tight">Another computer</h3>
+                <p className="mt-2 leading-7 text-muted">
+                  Share a paper on the local network, or through a relay. The other device joins from a link and keeps
+                  a full copy that works offline, then merges when it reconnects. The link is the access token, so treat
+                  it like a password.
+                </p>
+              </div>
             </div>
           </div>
         </div>

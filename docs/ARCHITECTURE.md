@@ -148,4 +148,10 @@ ChatGPT and Gemini use the same panel and the same event shape. ChatGPT spawns
 `codex exec --json` once per message (resumed by thread id) with the paper server passed
 as `mcp_servers.paper`. Gemini keeps one `agy --input-format stream-json` process open and
 writes the paper server into the workspace `.agents/mcp_config.json`. Their stdout is
-translated into the Claude events above before it reaches the panel.
+translated into the Claude events above before it reaches the panel. A Claude message
+can include image and PDF blocks. `/usage` and `/status` are answered from the signed-in
+Claude account, because the headless session cannot open those screens. `/plugin` and the
+other terminal-only commands are opened in Claude Code's terminal. `/context` and `/compact`
+are sent through as typed. ChatGPT images are passed with `--image`.
+Gemini only accepts text, so attached files are saved under `.paper/attachments` and named
+in the prompt.

@@ -880,16 +880,23 @@ async fn install_tectonic(app: AppHandle) -> CmdResult<setup::SetupStatus> {
 
 #[tauri::command]
 async fn claude_status(assistant: Option<String>) -> CmdResult<claude::ClaudeStatus> {
-    tauri::async_runtime::spawn_blocking(move || claude::status_for(assistant.as_deref().unwrap_or("claude")))
-        .await
-        .map_err(err)
+    tauri::async_runtime::spawn_blocking(move || {
+        claude::status_for(assistant.as_deref().unwrap_or("claude"))
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
-async fn claude_install(app: AppHandle, assistant: Option<String>) -> CmdResult<claude::ClaudeStatus> {
-    tauri::async_runtime::spawn_blocking(move || claude::install_for(&app, assistant.as_deref().unwrap_or("claude")))
-        .await
-        .map_err(err)?
+async fn claude_install(
+    app: AppHandle,
+    assistant: Option<String>,
+) -> CmdResult<claude::ClaudeStatus> {
+    tauri::async_runtime::spawn_blocking(move || {
+        claude::install_for(&app, assistant.as_deref().unwrap_or("claude"))
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -936,11 +943,17 @@ fn claude_send(
     chat_id: String,
     text: String,
     context: Option<claude::EditorContext>,
+    attachments: Option<Vec<claude::ChatAttachment>>,
 ) -> CmdResult<()> {
     let root = state.with(|ws| Ok(ws.project.root.clone()))?;
-    state
-        .claude
-        .send(&app, &root, &chat_id, &text, &context.unwrap_or_default())
+    state.claude.send(
+        &app,
+        &root,
+        &chat_id,
+        &text,
+        &context.unwrap_or_default(),
+        &attachments.unwrap_or_default(),
+    )
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -959,9 +972,11 @@ fn claude_stop(state: State<AppState>, chat_id: String) -> CmdResult<Option<Stri
 
 #[tauri::command]
 async fn claude_auth(assistant: Option<String>) -> CmdResult<claude::ClaudeAuth> {
-    tauri::async_runtime::spawn_blocking(move || claude::auth_for(assistant.as_deref().unwrap_or("claude")))
-        .await
-        .map_err(err)
+    tauri::async_runtime::spawn_blocking(move || {
+        claude::auth_for(assistant.as_deref().unwrap_or("claude"))
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command(rename_all = "snake_case")]

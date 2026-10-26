@@ -366,7 +366,7 @@ TODO: context, gap, approach, key result, implication.
 
 const BIB_TEMPLATE: &str = "% Bibliography. Agents must only cite keys that exist here.\n";
 
-const GITIGNORE_TEMPLATE: &str = "# LaTeX build artefacts\n*.aux\n*.log\n*.out\n*.toc\n*.bbl\n*.blg\n*.fls\n*.fdb_latexmk\n*.synctex.gz\n# LetsWritePaper runtime files\n.paper/owner.lock\n.paper/remote.json\n.paper/history.db-wal\n.paper/history.db-shm\n.paper/build/\n";
+const GITIGNORE_TEMPLATE: &str = "# LaTeX build artefacts\n*.aux\n*.log\n*.out\n*.toc\n*.bbl\n*.blg\n*.fls\n*.fdb_latexmk\n*.synctex.gz\n# LetsWritePaper runtime files\n.paper/owner.lock\n.paper/remote.json\n.paper/history.db-wal\n.paper/history.db-shm\n.paper/build/\n.paper/attachments/\n";
 
 #[cfg(test)]
 mod tests {

@@ -3,6 +3,7 @@ node_modules/
 /app/dist
 /app/src-tauri/gen
 .paper/owner.lock
+.paper/attachments/
 .DS_Store
 Thumbs.db
 .paper/remote.json

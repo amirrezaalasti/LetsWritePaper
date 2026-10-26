@@ -251,6 +251,12 @@ export interface EditorContext {
   selection?: string;
 }
 
+export interface ChatAttachment {
+  name: string;
+  media_type: string;
+  data: string;
+}
+
 export const api = {
   openProject: (path: string) => invoke<ProjectInfo>("open_project", { path }),
   initProject: (path: string, title: string, format: "latex" | "typst") =>
@@ -343,8 +349,8 @@ export const api = {
       assistant,
       api_key,
     }),
-  claudeSend: (chat_id: string, text: string, context?: EditorContext) =>
-    invoke<void>("claude_send", { chat_id, text, context }),
+  claudeSend: (chat_id: string, text: string, context?: EditorContext, attachments?: ChatAttachment[]) =>
+    invoke<void>("claude_send", { chat_id, text, context, attachments }),
   claudePermission: (chat_id: string, reply: ClaudePermissionReply) =>
     invoke<void>("claude_permission", { chat_id, reply }),
   claudeStop: (chat_id: string) => invoke<string | null>("claude_stop", { chat_id }),

@@ -97,7 +97,7 @@ The first time the app opens, a setup wizard asks for the name your edits should
 - For LaTeX preview: [`tectonic`](https://tectonic-typesetting.github.io/) (the setup wizard installs it) or a TeX
   distribution with `latexmk`. Typst preview is built into the desktop app.
 - On Linux, the Tauri system packages: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf`.
-- For the assistant panel: Claude Code, Codex, or Antigravity (the setup wizard can install them) and the matching account. Claude can use a Claude account or an API key. ChatGPT uses a ChatGPT login or an OpenAI API key. Gemini uses a Google AI Pro or Ultra account through Antigravity, or a Gemini API key.
+- For the assistant panel: Claude Code, Codex, or Antigravity (the setup wizard can install hem) and thet matching account. Claude can use a Claude account or an API key. ChatGPT uses a ChatGPT login or an OpenAI API key. Gemini uses a Google AI Pro or Ultra account through Antigravity, or a Gemini API key.
 
 ### Desktop app
 
@@ -163,9 +163,16 @@ each keeps its own chats. You can switch among them from 🔑.
 - **Modes.** *Paper tools* (default) pre-approves the paper tools and reading files. With Claude,
   web search and anything else ask you to allow them in the chat. *Paper tools + file edits*
   also accepts file edits without asking. ChatGPT and Gemini cannot ask in the panel, so
-  Gemini pre-approves its tools and ChatGPT's file-edit mode auto-approves workspace edits.
+  Gemini pre-approves its tools and ChatGPT's file-editde aung to-approves workspace edits.
 - **Context.** Each message carries the open file, cursor section and selection (toggle
   *Editor context*).
+- **Files.** Paste, drop, or use 📎 to attach images and files (4 MB each, 8 MB per message).
+  Claude sees images and PDFs in the message. ChatGPT receives images with the message.
+  Gemini is given the saved file so it can read it. Files are kept in `.paper/attachments`.
+- **Slash commands.** In a Claude chat, type `/`. `/usage` and `/status` show this account's
+  session, weekly, and extra-usage limits. Screens such as `/plugin` and `/skills` open in
+  Claude Code's terminal, because that program only runs them there. `/context` and `/compact`
+  run in the chat.
 - **Sessions.** Pick an earlier chat from the menu to resume it (`--resume`).
 - **📱 Continue on another device.** Hands the chat to Claude Code's
   [Remote Control](https://code.claude.com/docs/en/remote-control.md), so you can keep talking

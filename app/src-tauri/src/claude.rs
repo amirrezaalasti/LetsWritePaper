@@ -8,14 +8,23 @@
 //! Control (`claude --resume <id> --remote-control`), opened in a terminal.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::{STANDARD as B64, STANDARD_NO_PAD as B64_NOPAD};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+
+const MAX_ATTACHMENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL: usize = 8 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 8;
+const MAX_ATTACHMENT_TEXT: usize = 100_000;
 
 const SYSTEM_PROMPT: &str = "You are working inside LetsWritePaper, a desktop editor for academic papers, as the user's co-author. \
 Use the paper's MCP tools (named mcp__paper__<tool>, e.g. mcp__paper__project_overview) for everything about the paper: project_overview to orient yourself; section_context before \
@@ -100,7 +109,10 @@ fn write_line(
 ) -> Result<(), String> {
     let mut chats = chats.lock().unwrap();
     let chat = chats.get_mut(chat_id).ok_or("this chat is not running")?;
-    let stdin = chat.stdin.as_mut().ok_or("this chat is not accepting input")?;
+    let stdin = chat
+        .stdin
+        .as_mut()
+        .ok_or("this chat is not accepting input")?;
     writeln!(stdin, "{line}").map_err(|e| format!("Claude Code is not accepting input: {e}"))?;
     stdin.flush().map_err(|e| e.to_string())
 }
@@ -189,6 +201,14 @@ pub struct EditorContext {
     pub selection: Option<String>,
 }
 
+/// A file pasted or attached in the composer. `data` is standard base64.
+#[derive(Debug, Deserialize)]
+pub struct ChatAttachment {
+    pub name: String,
+    pub media_type: String,
+    pub data: String,
+}
+
 // ---- finding and installing the CLI ------------------------------------------------
 
 /// Directories GUI apps often lack on PATH but installers use.
@@ -200,6 +220,9 @@ fn extra_dirs() -> Vec<PathBuf> {
         dirs.push(home.join(".npm-global").join("bin"));
         dirs.push(home.join(".bun").join("bin"));
         if cfg!(windows) {
+            if let Ok(local) = std::env::var("LOCALAPPDATA") {
+                dirs.push(PathBuf::from(local).join("agy").join("bin"));
+            }
             if let Ok(appdata) = std::env::var("APPDATA") {
                 dirs.push(PathBuf::from(appdata).join("npm"));
             }
@@ -356,7 +379,13 @@ fn codex_auth() -> ClaudeAuth {
     ClaudeAuth {
         logged_in,
         provider: provider.into(),
-        detail: text.lines().next().unwrap_or("").chars().take(180).collect(),
+        detail: text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(180)
+            .collect(),
     }
 }
 
@@ -439,10 +468,23 @@ fn parse_json_object(text: &str) -> Option<Value> {
 /// Run the official installer, streaming its output to the UI.
 pub fn install_for(app: &AppHandle, assistant: &str) -> Result<ClaudeStatus, String> {
     let assistant = crate::assistants::normalize(Some(assistant));
+    if assistant == "gemini" {
+        let app = app.clone();
+        crate::assistants::install_antigravity(|line| {
+            let _ = app.emit("claude://install-log", line.to_string());
+        })?;
+        return Ok(status_for(assistant));
+    }
     let command = crate::assistants::install_command(assistant);
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("powershell");
-        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command]);
+        c.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &command,
+        ]);
         c
     } else {
         let mut c = Command::new("/bin/bash");
@@ -559,7 +601,9 @@ impl ClaudeChats {
         self.stop(chat_id);
         match crate::assistants::normalize(assistant) {
             "chatgpt" => return self.start_codex(chat_id, resume, mode, model),
-            "gemini" => return self.start_agy(app, root, chat_id, resume, model, provider, api_key),
+            "gemini" => {
+                return self.start_agy(app, root, chat_id, resume, model, provider, api_key)
+            }
             _ => {}
         }
         let claude = find_claude().ok_or("Claude Code is not installed")?;
@@ -731,7 +775,8 @@ impl ClaudeChats {
         provider: Option<&str>,
         api_key: Option<&str>,
     ) -> Result<(), String> {
-        let agy = find_named(crate::assistants::bin_names("gemini")).ok_or("Antigravity is not installed")?;
+        let agy = find_named(crate::assistants::bin_names("gemini"))
+            .ok_or("Antigravity is not installed")?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         crate::assistants::ensure_workspace_mcp(root, &exe.display().to_string(), "gemini")?;
         let use_api_key = provider == Some("apikey");
@@ -781,6 +826,7 @@ impl ClaudeChats {
         chat_id: &str,
         text: &str,
         ctx: &EditorContext,
+        attachments: &[ChatAttachment],
     ) -> Result<(), String> {
         let assistant = {
             let chats = self.chats.lock().unwrap();
@@ -789,27 +835,32 @@ impl ClaudeChats {
                 .map(|chat| chat.assistant.clone())
                 .ok_or("this chat is not running")?
         };
-        if assistant == "chatgpt" {
-            return self.send_codex(app, root, chat_id, text, ctx);
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Err("Write a message or attach a file.".into());
         }
-        let content = message_text(text, ctx, assistant == "gemini");
-        let line = if assistant == "gemini" {
-            json!({ "event": "user", "message": { "content": content } })
-        } else {
-            json!({
-                "type": "user",
-                "message": { "role": "user", "content": [{ "type": "text", "text": content }] },
-                "parent_tool_use_id": null,
-            })
-        };
+        slash_for_assistant(&assistant, text)?;
+        if assistant == "claude" && attachments.is_empty() {
+            if let Some(answer) = self.local_slash_answer(root, chat_id, text) {
+                emit_local_answer(app, chat_id, &answer);
+                return Ok(());
+            }
+        }
+        let files = prepare_attachments(root, attachments)?;
+        if assistant == "chatgpt" {
+            return self.send_codex(app, root, chat_id, text, ctx, &files);
+        }
+        let line = outbound_line(&assistant, text, ctx, &files);
         let mut chats = self.chats.lock().unwrap();
         let chat = chats.get_mut(chat_id).ok_or("this chat is not running")?;
-        let stdin = chat.stdin.as_mut().ok_or("this chat is not accepting input")?;
-        writeln!(stdin, "{line}").map_err(|e| format!("the assistant is not accepting input: {e}"))?;
+        let stdin = chat
+            .stdin
+            .as_mut()
+            .ok_or("this chat is not accepting input")?;
+        writeln!(stdin, "{line}")
+            .map_err(|e| format!("the assistant is not accepting input: {e}"))?;
         stdin.flush().map_err(|e| e.to_string())?;
         if let Some(sid) = chat.session_id.lock().unwrap().clone() {
-            let title: String = text.chars().take(60).collect();
-            touch_session(root, &sid, Some(&title), &assistant);
+            touch_session(root, &sid, Some(&message_title(text, &files)), &assistant);
         }
         Ok(())
     }
@@ -821,6 +872,7 @@ impl ClaudeChats {
         chat_id: &str,
         text: &str,
         ctx: &EditorContext,
+        files: &[PreparedFile],
     ) -> Result<(), String> {
         let (model, mode, resume, run, session_id) = {
             let chats = self.chats.lock().unwrap();
@@ -835,8 +887,14 @@ impl ClaudeChats {
             let session_id = Arc::clone(&chat.session_id);
             (model, mode, resume, run, session_id)
         };
-        let bin = find_named(crate::assistants::bin_names("chatgpt")).ok_or("Codex is not installed")?;
+        let bin =
+            find_named(crate::assistants::bin_names("chatgpt")).ok_or("Codex is not installed")?;
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let images: Vec<String> = files
+            .iter()
+            .filter(|file| file.kind == AttachKind::Image)
+            .map(|file| file.abs.display().to_string())
+            .collect();
         let mut cmd = Command::new(bin);
         cmd.current_dir(root)
             .env("PATH", child_path())
@@ -846,12 +904,15 @@ impl ClaudeChats {
                 resume.as_deref(),
                 &mode,
                 Some(&model),
+                &images,
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("could not start Codex: {e}"))?;
-        let prompt = message_text(text, ctx, true);
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("could not start Codex: {e}"))?;
+        let prompt = prompt_for("chatgpt", text, ctx, files);
         if let Some(mut stdin) = child.stdin.take() {
             writeln!(stdin, "{prompt}").map_err(|e| e.to_string())?;
         }
@@ -861,7 +922,7 @@ impl ClaudeChats {
         let app = app.clone();
         let root = root.to_path_buf();
         let chat_id = chat_id.to_string();
-        let title: String = text.chars().take(60).collect();
+        let title = message_title(text, files);
         let model = model.clone();
         let stderr_buf = Arc::new(Mutex::new(Vec::<String>::new()));
         let stderr_handle = stderr.map(|stderr| {
@@ -935,6 +996,41 @@ impl ClaudeChats {
         sid
     }
 
+    /// `/usage` and `/status` are screens in Claude Code's terminal. This chat
+    /// has no terminal, so the panel answers them from the signed-in account.
+    /// Plugin, skill, and settings screens are opened in a terminal instead of
+    /// being sent, where this Claude build would reply "Unknown command".
+    fn local_slash_answer(&self, root: &Path, chat_id: &str, text: &str) -> Option<String> {
+        let name = slash_name(text)?;
+        match name {
+            "usage" | "cost" | "stats" | "usage-credits" | "extra-usage" => {
+                Some(plan_usage_report())
+            }
+            "status" => Some(status_report()),
+            "plugin" | "skills" | "doctor" | "checkup" | "help" | "mcp" | "permissions"
+            | "allowed-tools" | "memory" | "diff" | "reload-plugins" | "reload-skills"
+            | "statusline" => {
+                let session = {
+                    let chats = self.chats.lock().unwrap();
+                    chats
+                        .get(chat_id)
+                        .and_then(|chat| chat.session_id.lock().unwrap().clone())
+                };
+                let opened = open_in_terminal(
+                    root,
+                    "resume",
+                    session.as_deref(),
+                    "LetsWritePaper",
+                    None,
+                    None,
+                    Some("claude"),
+                );
+                Some(terminal_slash_message(name, opened.err().as_deref()))
+            }
+            _ => None,
+        }
+    }
+
     pub fn stop_all(&self) {
         let ids: Vec<String> = self.chats.lock().unwrap().keys().cloned().collect();
         for id in ids {
@@ -968,6 +1064,692 @@ fn message_text(text: &str, ctx: &EditorContext, instructions: bool) -> String {
     }
     content.push_str(text);
     content
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AttachKind {
+    Image,
+    Pdf,
+    Text,
+    Other,
+}
+
+#[derive(Debug)]
+struct PreparedFile {
+    name: String,
+    rel: String,
+    abs: PathBuf,
+    kind: AttachKind,
+    /// Normalized MIME for an image or PDF block. Empty otherwise.
+    media: String,
+    /// Base64 payload for an image or PDF block.
+    data: String,
+    text: Option<String>,
+}
+
+fn slash_for_assistant(assistant: &str, text: &str) -> Result<(), String> {
+    if is_slash_command(text) && assistant != "claude" {
+        Err("Commands such as /usage, /status, and /plugin are part of Claude. Switch to Claude with the key button.".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// A Claude Code command is recognized only when it is the start of the message.
+fn is_slash_command(text: &str) -> bool {
+    let first = text.trim().lines().next().unwrap_or("").trim();
+    let token = first.split_whitespace().next().unwrap_or("");
+    let mut chars = token.chars();
+    chars.next() == Some('/') && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// The command name without the leading slash, when the message is a command.
+fn slash_name(text: &str) -> Option<&str> {
+    if !is_slash_command(text) {
+        return None;
+    }
+    let token = text
+        .trim()
+        .lines()
+        .next()?
+        .trim()
+        .split_whitespace()
+        .next()?;
+    Some(token.trim_start_matches('/'))
+}
+
+fn emit_local_answer(app: &AppHandle, chat_id: &str, text: &str) {
+    let id = format!(
+        "local-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let _ = app.emit(
+        "claude://event",
+        ChatEvent {
+            chat_id: chat_id.to_string(),
+            event: json!({
+                "type": "assistant",
+                "message": { "id": id, "content": [{ "type": "text", "text": text }] },
+            }),
+        },
+    );
+    let _ = app.emit(
+        "claude://event",
+        ChatEvent {
+            chat_id: chat_id.to_string(),
+            event: json!({ "type": "result", "is_error": false }),
+        },
+    );
+}
+
+fn terminal_slash_message(name: &str, open_error: Option<&str>) -> String {
+    let command = format!("/{name}");
+    match open_error {
+        None => format!(
+            "{command} runs in Claude Code's own terminal, which is now open on this paper. Type {command} there."
+        ),
+        Some(error) => format!(
+            "{command} runs in Claude Code's own terminal. The keyboard button in this panel opens it. {error}"
+        ),
+    }
+}
+
+fn status_report() -> String {
+    let status = status_for("claude");
+    let auth = auth_for("claude");
+    let mut lines = Vec::new();
+    if let Some(version) = status.version.filter(|v| !v.is_empty()) {
+        lines.push(format!("Claude Code {version}"));
+    } else {
+        lines.push("Claude Code".into());
+    }
+    if auth.logged_in {
+        let who = if auth.detail.is_empty() {
+            auth.provider
+        } else {
+            auth.detail
+        };
+        lines.push(format!("Signed in: {who}"));
+    }
+    lines.push(String::new());
+    lines.push(plan_usage_report());
+    lines.join("\n")
+}
+
+fn plan_usage_report() -> String {
+    let creds = match read_claude_account() {
+        Ok(creds) => creds,
+        Err(error) => return error,
+    };
+    let Some(token) = creds.token.filter(|token| !token.is_empty()) else {
+        return "This Claude login has no subscription usage to show. An API-key login is billed per request.".into();
+    };
+    match fetch_plan_usage(&token) {
+        Ok(body) => format_plan_usage(&body, &creds.plan),
+        Err(error) => format!("Plan usage could not be loaded. {error}"),
+    }
+}
+
+struct ClaudeAccount {
+    token: Option<String>,
+    plan: String,
+}
+
+fn read_claude_account() -> Result<ClaudeAccount, String> {
+    let value = read_claude_credentials()?;
+    let oauth = value.get("claudeAiOauth").cloned().unwrap_or(Value::Null);
+    let plan = oauth
+        .get("subscriptionType")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let token = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(ClaudeAccount { token, plan })
+}
+
+fn read_claude_credentials() -> Result<Value, String> {
+    if let Some(home) = home_dir() {
+        let path = home.join(".claude").join(".credentials.json");
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                return Ok(value);
+            }
+        }
+    }
+    if cfg!(target_os = "macos") {
+        let output = Command::new("security")
+            .args([
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ])
+            .output()
+            .map_err(|_| "Plan usage could not be read from this Mac.".to_string())?;
+        if !output.status.success() {
+            return Err("Claude Code has no saved account on this Mac.".into());
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        return serde_json::from_str(text.trim())
+            .map_err(|_| "Claude Code's saved account could not be read.".to_string());
+    }
+    Err("Claude Code has no saved account to read plan usage from.".into())
+}
+
+/// The token stays in a curl config file, not in the process arguments.
+fn fetch_plan_usage(token: &str) -> Result<Value, String> {
+    let path = std::env::temp_dir().join(format!(
+        "lwp-usage-{}-{}.curl",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let config = format!(
+        "silent\nshow-error\nmax-time = 15\nheader = \"Authorization: Bearer {token}\"\nheader = \"anthropic-beta: oauth-2025-04-20\"\nheader = \"Accept: application/json\"\nheader = \"User-Agent: claude-code/letswritepaper\"\nurl = \"https://api.anthropic.com/api/oauth/usage\"\n"
+    );
+    fs::write(&path, &config).map_err(|_| "Plan usage could not be requested.".to_string())?;
+    let _secret = SecretFile(path.clone());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+    let output = Command::new("curl")
+        .arg("--config")
+        .arg(&path)
+        .output()
+        .map_err(|_| "Plan usage could not be requested.".to_string())?;
+    if !output.status.success() {
+        return Err("Claude's usage service did not respond.".into());
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Claude's usage service sent an unexpected reply.".into())
+}
+
+fn format_plan_usage(body: &Value, plan: &str) -> String {
+    let mut lines = vec!["**Plan usage**".to_string()];
+    if let Some(label) = plan_label(plan) {
+        lines[0] = format!("**Plan usage** · {label}");
+    }
+    if let Some(limits) = body.get("limits").and_then(Value::as_array) {
+        for limit in limits {
+            let Some(kind) = limit.get("kind").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(label) = limit_label(kind) else {
+                continue;
+            };
+            let percent = limit.get("percent").and_then(Value::as_f64).unwrap_or(0.0);
+            let reset = limit
+                .get("resets_at")
+                .and_then(Value::as_str)
+                .map(format_reset)
+                .unwrap_or_default();
+            if reset.is_empty() {
+                lines.push(format!("- {label}: {} used", percent_text(percent)));
+            } else {
+                lines.push(format!(
+                    "- {label}: {} used, resets {reset}",
+                    percent_text(percent)
+                ));
+            }
+        }
+    }
+    if lines.len() == 1 {
+        for (key, label) in [
+            ("five_hour", "Session limit"),
+            ("seven_day", "Weekly limit"),
+        ] {
+            if let Some(window) = body.get(key) {
+                if let Some(line) = window_line(label, window) {
+                    lines.push(line);
+                }
+            }
+        }
+    }
+    if let Some(extra) = extra_usage_line(body.get("extra_usage")) {
+        lines.push(extra);
+    }
+    if lines.len() == 1 {
+        lines.push("Claude did not report session or weekly limits for this account.".into());
+    }
+    lines.join("\n")
+}
+
+fn window_line(label: &str, window: &Value) -> Option<String> {
+    let percent = window.get("utilization").and_then(Value::as_f64)?;
+    let reset = window
+        .get("resets_at")
+        .and_then(Value::as_str)
+        .map(format_reset)
+        .unwrap_or_default();
+    if reset.is_empty() {
+        Some(format!("- {label}: {} used", percent_text(percent)))
+    } else {
+        Some(format!(
+            "- {label}: {} used, resets {reset}",
+            percent_text(percent)
+        ))
+    }
+}
+
+fn extra_usage_line(extra: Option<&Value>) -> Option<String> {
+    let extra = extra?;
+    if extra.get("is_enabled").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let places = extra
+        .get("decimal_places")
+        .and_then(Value::as_u64)
+        .unwrap_or(2) as u32;
+    let currency = extra
+        .get("currency")
+        .and_then(Value::as_str)
+        .unwrap_or("USD");
+    let used = extra.get("used_credits").and_then(Value::as_f64)?;
+    let limit = extra.get("monthly_limit").and_then(Value::as_f64);
+    let used_text = money(used, places, currency);
+    let percent = extra
+        .get("utilization")
+        .and_then(Value::as_f64)
+        .map(|value| format!(", {}", percent_text(value)))
+        .unwrap_or_default();
+    match limit {
+        Some(limit) => Some(format!(
+            "- Extra usage: {used_text} of {}{percent}",
+            money(limit, places, currency)
+        )),
+        None => Some(format!("- Extra usage: {used_text} used{percent}")),
+    }
+}
+
+fn limit_label(kind: &str) -> Option<&'static str> {
+    match kind {
+        "session" => Some("Session limit"),
+        "weekly_all" | "weekly" => Some("Weekly limit"),
+        "seven_day_opus" | "opus" => Some("Opus weekly limit"),
+        "seven_day_sonnet" | "sonnet" => Some("Sonnet weekly limit"),
+        _ => None,
+    }
+}
+
+fn plan_label(plan: &str) -> Option<&'static str> {
+    match plan {
+        "pro" => Some("Pro"),
+        "max" => Some("Max"),
+        "team" => Some("Team"),
+        "enterprise" => Some("Enterprise"),
+        "ultra" => Some("Ultra"),
+        _ => None,
+    }
+}
+
+fn percent_text(value: f64) -> String {
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0}%", value.round())
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
+fn money(amount: f64, places: u32, currency: &str) -> String {
+    let scale = 10f64.powi(places as i32);
+    let value = if places == 0 { amount } else { amount / scale };
+    if currency.eq_ignore_ascii_case("USD") {
+        format!("${value:.2}")
+    } else {
+        format!("{value:.2} {currency}")
+    }
+}
+
+struct SecretFile(PathBuf);
+
+impl Drop for SecretFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn format_reset(raw: &str) -> String {
+    let date = raw.get(..10).unwrap_or(raw);
+    let time = raw.get(11..16).unwrap_or("");
+    let zone = if raw.ends_with('Z') || raw.contains("+00:00") {
+        " UTC"
+    } else {
+        ""
+    };
+    if time.is_empty() {
+        date.to_string()
+    } else {
+        format!("{date} {time}{zone}")
+    }
+}
+
+fn message_title(text: &str, files: &[PreparedFile]) -> String {
+    let spoken = text.trim();
+    if !spoken.is_empty() {
+        return spoken.chars().take(60).collect();
+    }
+    files
+        .first()
+        .map(|file| file.name.chars().take(60).collect())
+        .unwrap_or_default()
+}
+
+fn prompt_for(assistant: &str, text: &str, ctx: &EditorContext, files: &[PreparedFile]) -> String {
+    let slash = assistant == "claude" && is_slash_command(text);
+    let spoken = if text.trim().is_empty() {
+        "Please look at the attached files."
+    } else {
+        text
+    };
+    let mut body = if slash {
+        text.trim().to_string()
+    } else {
+        message_text(spoken, ctx, assistant != "claude")
+    };
+    if !slash {
+        body.push_str(&attachment_note(files));
+    }
+    body
+}
+
+fn outbound_line(
+    assistant: &str,
+    text: &str,
+    ctx: &EditorContext,
+    files: &[PreparedFile],
+) -> Value {
+    let body = prompt_for(assistant, text, ctx, files);
+    if assistant == "gemini" {
+        return json!({ "event": "user", "message": { "content": body } });
+    }
+    let slash = is_slash_command(text);
+    let mut blocks = vec![json!({ "type": "text", "text": body })];
+    if !slash {
+        for file in files {
+            match file.kind {
+                AttachKind::Image => blocks.push(json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": file.media, "data": file.data },
+                })),
+                AttachKind::Pdf => blocks.push(json!({
+                    "type": "document",
+                    "source": { "type": "base64", "media_type": "application/pdf", "data": file.data },
+                })),
+                AttachKind::Text | AttachKind::Other => {}
+            }
+        }
+    }
+    json!({
+        "type": "user",
+        "message": { "role": "user", "content": blocks },
+        "parent_tool_use_id": null,
+    })
+}
+
+fn attachment_note(files: &[PreparedFile]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut note = String::from("\n\nAttached files:\n");
+    for file in files {
+        note.push_str(&format!(
+            "- {} ({}, {})\n",
+            file.name,
+            kind_label(file.kind),
+            file.rel
+        ));
+        if let Some(text) = &file.text {
+            note.push_str(&format!("Contents of {}:\n```\n{text}\n```\n", file.name));
+        }
+    }
+    note
+}
+
+fn kind_label(kind: AttachKind) -> &'static str {
+    match kind {
+        AttachKind::Image => "image",
+        AttachKind::Pdf => "pdf",
+        AttachKind::Text => "text",
+        AttachKind::Other => "file",
+    }
+}
+
+fn prepare_attachments(
+    root: &Path,
+    attachments: &[ChatAttachment],
+) -> Result<Vec<PreparedFile>, String> {
+    if attachments.is_empty() {
+        return Ok(Vec::new());
+    }
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err("You can attach up to 8 files.".into());
+    }
+    let dir = root.join(".paper").join("attachments");
+    fs::create_dir_all(&dir).map_err(|e| format!("could not save the attachment: {e}"))?;
+    ignore_attachments(root);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let mut total = 0usize;
+    let mut prepared = Vec::with_capacity(attachments.len());
+    for (index, attachment) in attachments.iter().enumerate() {
+        let name = display_name(&attachment.name);
+        let bytes = decode_attachment(&name, &attachment.data)?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(format!("{name} is larger than 4 MB"));
+        }
+        if total + bytes.len() > MAX_ATTACHMENT_TOTAL {
+            return Err("Attachments are limited to 8 MB altogether.".into());
+        }
+        total += bytes.len();
+        let filename = format!("{stamp}-{index}-{}", safe_file_name(&name));
+        let abs = dir.join(&filename);
+        fs::write(&abs, &bytes).map_err(|e| format!("could not save {name}: {e}"))?;
+        let rel = format!(".paper/attachments/{filename}");
+        let (kind, media, data, text) = classify(&name, &attachment.media_type, &bytes);
+        prepared.push(PreparedFile {
+            name,
+            rel,
+            abs,
+            kind,
+            media,
+            data,
+            text,
+        });
+    }
+    Ok(prepared)
+}
+
+fn decode_attachment(name: &str, data: &str) -> Result<Vec<u8>, String> {
+    let data: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    if data.is_empty() {
+        return Err(format!("{name} is empty"));
+    }
+    B64.decode(&data)
+        .or_else(|_| B64_NOPAD.decode(&data))
+        .map_err(|_| format!("{name} could not be read"))
+}
+
+fn classify(
+    name: &str,
+    media_type: &str,
+    bytes: &[u8],
+) -> (AttachKind, String, String, Option<String>) {
+    if let Some(media) = image_type(media_type, name) {
+        return (
+            AttachKind::Image,
+            media.to_string(),
+            B64.encode(bytes),
+            None,
+        );
+    }
+    if is_pdf(media_type, name) {
+        return (
+            AttachKind::Pdf,
+            "application/pdf".into(),
+            B64.encode(bytes),
+            None,
+        );
+    }
+    if is_text_file(media_type, name) {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return (
+                AttachKind::Text,
+                String::new(),
+                String::new(),
+                Some(clip_text(text)),
+            );
+        }
+    }
+    (AttachKind::Other, String::new(), String::new(), None)
+}
+
+fn image_type(media_type: &str, name: &str) -> Option<&'static str> {
+    match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => return Some("image/jpeg"),
+        "image/png" => return Some("image/png"),
+        "image/gif" => return Some("image/gif"),
+        "image/webp" => return Some("image/webp"),
+        _ => {}
+    }
+    match extension(name).as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn is_pdf(media_type: &str, name: &str) -> bool {
+    media_type.trim().eq_ignore_ascii_case("application/pdf") || extension(name) == "pdf"
+}
+
+fn is_text_file(media_type: &str, name: &str) -> bool {
+    let media = media_type.trim().to_ascii_lowercase();
+    if media.starts_with("text/")
+        || media == "application/json"
+        || media == "application/xml"
+        || media == "application/javascript"
+        || media == "application/x-tex"
+        || media == "image/svg+xml"
+    {
+        return true;
+    }
+    matches!(
+        extension(name).as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "tex"
+            | "ltx"
+            | "typ"
+            | "bib"
+            | "csv"
+            | "tsv"
+            | "json"
+            | "jsonl"
+            | "toml"
+            | "yml"
+            | "yaml"
+            | "xml"
+            | "html"
+            | "css"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "py"
+            | "rs"
+            | "sh"
+            | "sty"
+            | "cls"
+            | "bst"
+            | "svg"
+            | "log"
+    )
+}
+
+fn clip_text(text: &str) -> String {
+    let mut count = 0usize;
+    for (index, _) in text.char_indices() {
+        if count == MAX_ATTACHMENT_TEXT {
+            return format!("{}\n… [truncated]", &text[..index]);
+        }
+        count += 1;
+    }
+    text.to_string()
+}
+
+fn extension(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+fn ignore_attachments(root: &Path) {
+    let path = root.join(".gitignore");
+    let Ok(existing) = fs::read_to_string(&path) else {
+        return;
+    };
+    if existing.lines().any(|line| {
+        let line = line.trim();
+        line == ".paper/attachments" || line == ".paper/attachments/"
+    }) {
+        return;
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(".paper/attachments/\n");
+    let _ = fs::write(path, next);
+}
+
+fn display_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    if base.is_empty() {
+        "file".into()
+    } else {
+        base.to_string()
+    }
+}
+
+fn safe_file_name(name: &str) -> String {
+    let mut clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while clean.starts_with('.') {
+        clean.remove(0);
+    }
+    if clean.is_empty() {
+        clean = "file".into();
+    }
+    if clean.len() > 80 {
+        clean.truncate(80);
+    }
+    clean
 }
 
 /// Read an Antigravity stream and emit it as panel events.
@@ -1005,7 +1787,11 @@ fn watch_output(
             if let Some(sid) = event
                 .get("conversation_id")
                 .and_then(Value::as_str)
-                .or_else(|| event.pointer("/result/conversation_id").and_then(Value::as_str))
+                .or_else(|| {
+                    event
+                        .pointer("/result/conversation_id")
+                        .and_then(Value::as_str)
+                })
             {
                 *session_id.lock().unwrap() = Some(sid.to_string());
                 touch_session(&root2, sid, None, "gemini");
@@ -1043,7 +1829,8 @@ pub fn login_api_key(assistant: &str, key: &str) -> Result<(), String> {
     }
     match crate::assistants::normalize(Some(assistant)) {
         "chatgpt" => {
-            let bin = find_named(crate::assistants::bin_names("chatgpt")).ok_or("Codex is not installed")?;
+            let bin = find_named(crate::assistants::bin_names("chatgpt"))
+                .ok_or("Codex is not installed")?;
             let mut child = Command::new(bin)
                 .args(["login", "--with-api-key"])
                 .env("PATH", child_path())
@@ -1328,7 +2115,12 @@ pub fn open_in_terminal(
 ) -> Result<String, String> {
     match crate::assistants::normalize(assistant) {
         "chatgpt" | "gemini" => {
-            return open_assistant_terminal(root, action, session, crate::assistants::normalize(assistant));
+            return open_assistant_terminal(
+                root,
+                action,
+                session,
+                crate::assistants::normalize(assistant),
+            );
         }
         _ => {}
     }
@@ -1464,7 +2256,10 @@ mod tests {
         ]));
         let body = &control_response(&reply).unwrap()["response"]["response"];
         assert_eq!(body["decisionClassification"], "user_permanent");
-        assert_eq!(body["updatedPermissions"][0]["rules"][0]["toolName"], "WebSearch");
+        assert_eq!(
+            body["updatedPermissions"][0]["rules"][0]["toolName"],
+            "WebSearch"
+        );
     }
 
     #[test]
@@ -1473,6 +2268,121 @@ mod tests {
         assert_eq!(v["type"], "control_response");
         assert_eq!(v["response"]["subtype"], "error");
         assert_eq!(v["response"]["request_id"], "r-9");
-        assert!(v["response"]["error"].as_str().unwrap().contains("something_invented_later"));
+        assert!(v["response"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("something_invented_later"));
+    }
+
+    fn attachment(name: &str, media: &str, bytes: &[u8]) -> ChatAttachment {
+        ChatAttachment {
+            name: name.into(),
+            media_type: media.into(),
+            data: B64.encode(bytes),
+        }
+    }
+
+    #[test]
+    fn slash_commands_stay_at_the_start_and_images_become_blocks() {
+        let dir = std::env::temp_dir().join(format!("lwp-attach-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".gitignore"), ".paper/owner.lock\n").unwrap();
+        let png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a];
+        let files = prepare_attachments(
+            &dir,
+            &[
+                attachment("plot.png", "image/png", &png),
+                attachment("notes.tex", "text/plain", br"\section{A}"),
+                attachment("scan.pdf", "application/pdf", b"%PDF-1.4"),
+            ],
+        )
+        .unwrap();
+        let ctx = EditorContext {
+            path: Some("main.tex".into()),
+            line: Some(4),
+            section: None,
+            selection: None,
+        };
+        let line = outbound_line("claude", "What is this figure?", &ctx, &files);
+        let blocks = &line["message"]["content"];
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.contains("<editor_context>"), "{text}");
+        assert!(text.contains("notes.tex"), "{text}");
+        assert!(text.contains("\\section{A}"), "{text}");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(
+            B64.decode(blocks[1]["source"]["data"].as_str().unwrap())
+                .unwrap(),
+            png
+        );
+        assert_eq!(blocks[2]["type"], "document");
+        assert_eq!(blocks[2]["source"]["media_type"], "application/pdf");
+        let slash = outbound_line("claude", "/usage", &ctx, &files);
+        let command = slash["message"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(command, "/usage");
+        assert_eq!(slash["message"]["content"].as_array().unwrap().len(), 1);
+        let gemini = outbound_line("gemini", "look", &EditorContext::default(), &files);
+        let body = gemini["message"]["content"].as_str().unwrap();
+        assert!(body.contains(".paper/attachments/"), "{body}");
+        assert!(!body.contains(&files[0].data), "{body}");
+        assert!(slash_for_assistant("gemini", "/status").is_err());
+        assert!(slash_for_assistant("claude", "/status").is_ok());
+        assert!(!is_slash_command("please /usage later"));
+        assert_eq!(slash_name("/usage"), Some("usage"));
+        assert_eq!(slash_name("/plugin list"), Some("plugin"));
+        assert!(slash_name("rewrite this section").is_none());
+        prepare_attachments(&dir, &[attachment("again.txt", "text/plain", b"ok")]).unwrap();
+        let ignore = fs::read_to_string(dir.join(".gitignore")).unwrap();
+        assert_eq!(ignore.matches(".paper/attachments/").count(), 1, "{ignore}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_usage_lists_session_weekly_and_extra_spend() {
+        let body = json!({
+            "limits": [
+                {"kind": "session", "percent": 11, "resets_at": "2026-10-26T21:29:59.658450+00:00"},
+                {"kind": "weekly_all", "percent": 9, "resets_at": "2026-11-02T01:59:59+00:00"}
+            ],
+            "extra_usage": {
+                "is_enabled": true,
+                "monthly_limit": 5000,
+                "used_credits": 4138.0,
+                "utilization": 82.76,
+                "currency": "USD",
+                "decimal_places": 2
+            }
+        });
+        let text = format_plan_usage(&body, "team");
+        assert!(text.contains("Team"), "{text}");
+        assert!(
+            text.contains("Session limit: 11% used, resets 2026-10-26 21:29 UTC"),
+            "{text}"
+        );
+        assert!(text.contains("Weekly limit: 9% used"), "{text}");
+        assert!(
+            text.contains("Extra usage: $41.38 of $50.00, 82.8%"),
+            "{text}"
+        );
+        assert!(!text.contains("accessToken"), "{text}");
+    }
+
+    #[test]
+    fn an_oversized_attachment_is_refused() {
+        let dir = std::env::temp_dir().join(format!("lwp-attach-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let err = prepare_attachments(
+            &dir,
+            &[attachment(
+                "big.txt",
+                "text/plain",
+                &vec![b'a'; MAX_ATTACHMENT_BYTES + 1],
+            )],
+        )
+        .unwrap_err();
+        assert!(err.contains("4 MB"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

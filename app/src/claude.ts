@@ -1,7 +1,7 @@
 // The Claude panel: chat with Claude Code about the paper. Claude edits
 // through the paper's MCP tools, so its changes stream into the editor and
 // history like a co-author's.
-import { api, events, type ClaudeAuthInfo, type ClaudePermissionReply, type ClaudeSession, type EditorContext } from "./api";
+import { api, events, type ChatAttachment, type ClaudeAuthInfo, type ClaudePermissionReply, type ClaudeSession, type EditorContext } from "./api";
 import { clear, h, showModal, timeAgo, toast } from "./ui";
 
 /** Minimal, safe Markdown: everything is escaped before formatting is applied. */
@@ -69,10 +69,105 @@ const AUTH_KEY = "letswritepaper.claudeAuth";
 const CUSTOM_MODEL = "__custom__";
 
 const ASSISTANTS: { id: AssistantId; label: string; product: string; placeholder: string }[] = [
-  { id: "claude", label: "Claude", product: "Claude Code", placeholder: "Ask Claude to draft, revise, review… (Enter to send, Shift+Enter for a new line)" },
-  { id: "chatgpt", label: "ChatGPT", product: "Codex", placeholder: "Ask ChatGPT to draft, revise, review… (Enter to send, Shift+Enter for a new line)" },
-  { id: "gemini", label: "Gemini", product: "Antigravity", placeholder: "Ask Gemini to draft, revise, review… (Enter to send, Shift+Enter for a new line)" },
+  { id: "claude", label: "Claude", product: "Claude Code", placeholder: "Ask Claude… Paste an image or file, or type / for usage, status, and plugins" },
+  { id: "chatgpt", label: "ChatGPT", product: "Codex", placeholder: "Ask ChatGPT… Paste an image or file (Enter to send, Shift+Enter for a new line)" },
+  { id: "gemini", label: "Gemini", product: "Antigravity", placeholder: "Ask Gemini… Paste a file and Gemini can read it (Enter to send, Shift+Enter for a new line)" },
 ];
+
+interface SlashCommand {
+  name: string;
+  detail: string;
+  /** A complete command can be sent as soon as it is chosen. */
+  send: boolean;
+}
+
+const SLASH: SlashCommand[] = [
+  { name: "/usage", detail: "Session, weekly, and extra-usage limits for this account", send: true },
+  { name: "/status", detail: "Claude Code version, account, and plan limits", send: true },
+  { name: "/cost", detail: "Same account limits as /usage", send: true },
+  { name: "/stats", detail: "Same account limits as /usage", send: true },
+  { name: "/plugin list", detail: "Plugins and extensions. Opens in Claude Code's terminal", send: true },
+  { name: "/plugin", detail: "Manage plugins. Opens in the terminal", send: false },
+  { name: "/reload-plugins", detail: "Reload plugins. Opens in the terminal", send: true },
+  { name: "/skills", detail: "Skills Claude Code can use. Opens in the terminal", send: true },
+  { name: "/reload-skills", detail: "Rescan skills. Opens in the terminal", send: true },
+  { name: "/doctor", detail: "Check the install. Opens in the terminal", send: true },
+  { name: "/help", detail: "List commands. Opens in the terminal", send: true },
+  { name: "/context", detail: "How full this chat's context window is", send: true },
+  { name: "/compact", detail: "Summarize the chat to free context. Add a focus after it", send: false },
+  { name: "/memory", detail: "What Claude remembers. Opens in the terminal", send: true },
+  { name: "/permissions", detail: "What Claude is allowed to do. Opens in the terminal", send: true },
+  { name: "/mcp", detail: "Connected MCP servers. Opens in the terminal", send: true },
+  { name: "/diff", detail: "Uncommitted changes. Opens in the terminal", send: true },
+  { name: "/mcp__paper__write-section", detail: "Paper skill: write a section", send: false },
+  { name: "/mcp__paper__review-paper", detail: "Paper skill: review the paper", send: false },
+  { name: "/mcp__paper__address-reviews", detail: "Paper skill: address review comments", send: false },
+];
+
+const MAX_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 8 * 1024 * 1024;
+const MAX_FILES = 8;
+
+interface PendingFile {
+  name: string;
+  media_type: string;
+  data: string;
+  bytes: number;
+  preview?: string;
+}
+
+function slashToken(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("/") || trimmed.includes("\n")) return "";
+  return trimmed.split(/\s/, 1)[0] ?? "";
+}
+
+function isSlashMessage(text: string): boolean {
+  const line = text.trim().split("\n", 1)[0]?.trim() ?? "";
+  return /^\/[A-Za-z]/.test(line.split(/\s/, 1)[0] ?? "");
+}
+
+function mediaFromName(name: string): string {
+  switch (name.split(".").pop()?.toLowerCase()) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "pdf":
+      return "application/pdf";
+    case "json":
+      return "application/json";
+    case "svg":
+      return "image/svg+xml";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function systemNote(ev: { message?: unknown; result?: unknown; content?: unknown; text?: unknown }): string {
+  for (const value of [ev.message, ev.result, ev.content, ev.text]) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function readBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result ?? "");
+      const comma = url.indexOf(",");
+      resolve(comma >= 0 ? url.slice(comma + 1) : "");
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
 
 const CHATGPT_ACCOUNTS: AccountOption[] = [
   { id: "chatgpt", label: "ChatGPT account", hint: "Opens a terminal to sign in with ChatGPT. Usage comes from that plan." },
@@ -417,6 +512,14 @@ export class ClaudePanel {
   private renderQueued = new Set<string>();
   private stderr: string[] = [];
   private ready = false;
+  private pending: PendingFile[] = [];
+  private attachRow: HTMLElement;
+  private slashMenu: HTMLElement;
+  private slashMatches: SlashCommand[] = [];
+  private slashIndex = 0;
+  private slashTokenShown = "";
+  private fileInput: HTMLInputElement;
+  private streamedThisTurn = false;
 
   constructor(
     private root: HTMLElement,
@@ -425,6 +528,17 @@ export class ClaudePanel {
   ) {
     this.log = h("div", { class: "chat-log", "aria-live": "polite" });
     this.input = h("textarea", { class: "chat-input", rows: 3, placeholder: assistantMeta("claude").placeholder });
+    this.attachRow = h("div", { class: "attach-row" });
+    this.attachRow.hidden = true;
+    this.slashMenu = h("div", { class: "slash-menu", role: "listbox", "aria-label": "Claude commands" });
+    this.slashMenu.hidden = true;
+    this.fileInput = h("input", { type: "file", multiple: true });
+    this.fileInput.hidden = true;
+    this.fileInput.addEventListener("change", () => {
+      const files = [...(this.fileInput.files ?? [])];
+      this.fileInput.value = "";
+      if (files.length) void this.addFiles(files);
+    });
     this.sendBtn = h("button", { class: "primary", onclick: () => void this.submit() }, "Send");
     this.statusLine = h("span", { class: "muted small" }, "");
     this.sessionSelect = h("select", { class: "small-select", "aria-label": "Chat session", onchange: () => void this.switchSession() });
@@ -447,10 +561,61 @@ export class ClaudePanel {
     });
     this.fillModelSelect();
     this.input.addEventListener("keydown", (e) => {
+      if (this.slashMatches.length && !this.slashMenu.hidden) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          this.slashIndex = Math.min(this.slashIndex + 1, this.slashMatches.length - 1);
+          this.paintSlash();
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          this.slashIndex = Math.max(this.slashIndex - 1, 0);
+          this.paintSlash();
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          this.closeSlash();
+          return;
+        }
+        if (e.key === "Tab") {
+          e.preventDefault();
+          const cmd = this.slashMatches[this.slashIndex];
+          if (cmd) this.applySlash(cmd);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+          const token = slashToken(this.input.value);
+          const cmd = this.slashMatches[this.slashIndex];
+          if (cmd && this.input.value.trim() === token) {
+            e.preventDefault();
+            if (cmd.send) void this.submit(cmd.name);
+            else this.applySlash(cmd);
+            return;
+          }
+        }
+      }
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         void this.submit();
       }
+    });
+    this.input.addEventListener("input", () => this.refreshSlash());
+    this.input.addEventListener("paste", (e) => {
+      const data = e.clipboardData;
+      if (!data) return;
+      const files = [...data.files];
+      if (!files.length) return;
+      e.preventDefault();
+      const pasted = data.getData("text/plain");
+      if (pasted) {
+        const start = this.input.selectionStart ?? this.input.value.length;
+        const end = this.input.selectionEnd ?? start;
+        this.input.value = this.input.value.slice(0, start) + pasted + this.input.value.slice(end);
+        this.refreshSlash();
+      }
+      void this.addFiles(files);
     });
     void events.onClaude(({ chat_id, event }) => {
       if (chat_id === this.chatId) this.onEvent(event);
@@ -474,6 +639,7 @@ export class ClaudePanel {
       onclick: async () => {
         btn.disabled = true;
         btn.textContent = "Installing…";
+        out.textContent = "";
         const unlisten = await events.onInstallLog((line) => {
           out.textContent += line + "\n";
           out.scrollTop = out.scrollHeight;
@@ -502,8 +668,10 @@ export class ClaudePanel {
         { class: "claude-setup" },
         h("h3", {}, `${meta.label} in your paper`),
         h("p", {}, `This panel runs ${meta.product} on this computer, with your account. It can draft, edit, review and compile through the paper's tools, and every change shows up live with its name in the history.`),
-        h("p", { class: "muted" }, `${meta.product} isn't installed yet. The official installer runs:`),
-        h("code", { class: "block" }, command),
+        h("p", { class: "muted" }, this.assistant === "gemini"
+          ? `${meta.product} isn't installed yet. The app downloads the current release and checks its published checksum before installing.`
+          : `${meta.product} isn't installed yet. The official installer runs:`),
+        this.assistant === "gemini" ? null : h("code", { class: "block" }, command),
         h("div", { class: "actions" }, btn, h("button", { onclick: () => ((this.ready = false), void this.show()) }, "I installed it"), h("button", { onclick: () => void this.signIn() }, "Use a different assistant")),
         out,
         h("p", { class: "muted small" }, "You can use Claude, ChatGPT, or Gemini. Each one signs in with its own account."),
@@ -551,19 +719,53 @@ export class ClaudePanel {
       this.log,
       h(
         "div",
-        { class: "chat-compose" },
+        {
+          class: "chat-compose",
+          ondragover: (e: Event) => {
+            const drag = e as DragEvent;
+            if (!drag.dataTransfer?.types.includes("Files")) return;
+            e.preventDefault();
+            (e.currentTarget as HTMLElement).classList.add("drop");
+          },
+          ondragleave: (e: Event) => (e.currentTarget as HTMLElement).classList.remove("drop"),
+          ondrop: (e: Event) => {
+            const drag = e as DragEvent;
+            e.preventDefault();
+            (e.currentTarget as HTMLElement).classList.remove("drop");
+            const files = [...(drag.dataTransfer?.files ?? [])];
+            if (files.length) void this.addFiles(files);
+          },
+        },
         h("div", { class: "chips" }, ...QUICK_ACTIONS.map(([label, prompt]) => h("button", { class: "chip add", onclick: () => void this.submit(prompt) }, label))),
+        this.slashMenu,
+        this.attachRow,
         this.input,
-        h("div", { class: "chat-bar" }, this.modelSelect, modeSelect, ctxToggle, this.statusLine, h("span", { class: "spacer" }), this.sendBtn),
+        this.fileInput,
+        h(
+          "div",
+          { class: "chat-bar" },
+          this.modelSelect,
+          modeSelect,
+          ctxToggle,
+          this.statusLine,
+          h("span", { class: "spacer" }),
+          h("button", { class: "icon", title: "Attach images or files", "aria-label": "Attach images or files", onclick: () => this.fileInput.click() }, "📎"),
+          this.sendBtn,
+        ),
       ),
     );
     this.statusLine.textContent = version ? `${meta.product} ${version.split(" ")[0]}` : "";
     this.input.placeholder = meta.placeholder;
+    this.paintAttachments();
+    this.refreshSlash();
     if (!this.log.childElementCount) {
       const credit = this.assistant === "claude" ? "claude-code" : this.assistant === "chatgpt" ? "codex" : "gemini";
+      const extra = this.assistant === "claude"
+        ? " Paste or drop images and files, or type / for usage, status, and plugins."
+        : " Paste or drop images and files.";
       this.log.append(
         h("div", { class: "chat-empty muted" },
-          h("p", {}, `Ask ${meta.label} to work on your paper. It sees which file and section you're in and what you've selected.`),
+          h("p", {}, `Ask ${meta.label} to work on your paper. It sees which file and section you're in and what you've selected.${extra}`),
           h("p", {}, `Its edits appear live in the editor, credited to ${credit} in History and Blame.`),
         ),
       );
@@ -633,20 +835,182 @@ export class ClaudePanel {
     this.note("Stopped. Send another message to continue the same chat.");
   }
 
+  private async addFiles(files: File[]) {
+    let total = this.pending.reduce((sum, file) => sum + file.bytes, 0);
+    for (const file of files) {
+      if (this.pending.length >= MAX_FILES) {
+        toast("You can attach up to 8 files.", "error");
+        break;
+      }
+      if (file.size > MAX_FILE_BYTES) {
+        toast(`${file.name || "That file"} is larger than 4 MB.`, "error");
+        continue;
+      }
+      if (total + file.size > MAX_TOTAL_BYTES) {
+        toast("Attachments are limited to 8 MB altogether.", "error");
+        break;
+      }
+      try {
+        const data = await readBase64(file);
+        if (!data) {
+          toast(`${file.name || "That file"} is empty.`, "error");
+          continue;
+        }
+        const media = file.type || mediaFromName(file.name);
+        const preview = media.startsWith("image/") && media !== "image/svg+xml" ? URL.createObjectURL(file) : undefined;
+        this.pending.push({ name: file.name || "file", media_type: media, data, bytes: file.size, preview });
+        total += file.size;
+      } catch (e) {
+        toast(String(e), "error");
+      }
+    }
+    this.paintAttachments();
+  }
+
+  private paintAttachments() {
+    clear(
+      this.attachRow,
+      ...this.pending.map((file, index) =>
+        h(
+          "span",
+          { class: "attach-chip" },
+          file.preview ? h("img", { src: file.preview, alt: "" }) : "",
+          h("span", {}, file.name),
+          h("button", {
+            class: "icon",
+            title: "Remove",
+            "aria-label": `Remove ${file.name}`,
+            onclick: () => this.removeAttachment(index),
+          }, "×"),
+        ),
+      ),
+    );
+    this.attachRow.hidden = this.pending.length === 0;
+  }
+
+  private removeAttachment(index: number) {
+    const [file] = this.pending.splice(index, 1);
+    if (file?.preview) URL.revokeObjectURL(file.preview);
+    this.paintAttachments();
+  }
+
+  private clearPending() {
+    this.pending = [];
+    this.paintAttachments();
+  }
+
+  private userBubble(caption: string, files: PendingFile[]) {
+    const bubble = h("div", { class: "msg user" }, h("div", {}, caption));
+    if (!files.length) return bubble;
+    const row = h("div", { class: "attach-sent" });
+    for (const file of files) {
+      if (file.preview) row.append(h("img", { class: "attach-thumb", src: file.preview, alt: file.name }));
+      else row.append(h("span", { class: "attach-chip" }, file.name));
+    }
+    bubble.append(row);
+    return bubble;
+  }
+
+  private refreshSlash() {
+    if (this.assistant !== "claude") {
+      this.closeSlash();
+      return;
+    }
+    const token = slashToken(this.input.value).toLowerCase();
+    if (!token) {
+      this.closeSlash();
+      return;
+    }
+    this.slashMatches = SLASH.filter((cmd) => cmd.name.startsWith(token));
+    if (!this.slashMatches.length) {
+      this.closeSlash();
+      return;
+    }
+    if (token !== this.slashTokenShown) {
+      this.slashTokenShown = token;
+      this.slashIndex = 0;
+    }
+    this.slashIndex = Math.min(this.slashIndex, this.slashMatches.length - 1);
+    this.paintSlash();
+    this.slashMenu.hidden = false;
+  }
+
+  private paintSlash() {
+    clear(
+      this.slashMenu,
+      ...this.slashMatches.map((cmd, index) =>
+        h(
+          "button",
+          {
+            type: "button",
+            class: `slash-item${index === this.slashIndex ? " active" : ""}`,
+            role: "option",
+            onclick: () => {
+              const typed = this.input.value.trim().slice(slashToken(this.input.value).length).trim();
+              if (cmd.send && !typed) void this.submit(cmd.name);
+              else this.applySlash(cmd);
+            },
+          },
+          h("code", {}, cmd.name),
+          h("span", {}, cmd.detail),
+        ),
+      ),
+    );
+  }
+
+  private applySlash(cmd: SlashCommand) {
+    const current = this.input.value.trim();
+    const token = slashToken(current);
+    const rest = token ? current.slice(token.length).trim() : "";
+    this.input.value = rest ? `${cmd.name} ${rest}` : cmd.send ? cmd.name : `${cmd.name} `;
+    this.closeSlash();
+    this.input.focus();
+  }
+
+  private closeSlash() {
+    this.slashMatches = [];
+    this.slashIndex = 0;
+    this.slashTokenShown = "";
+    this.slashMenu.hidden = true;
+    clear(this.slashMenu);
+  }
+
   async submit(text?: string) {
+    const fromComposer = text === undefined;
     const msg = (text ?? this.input.value).trim();
-    if (!msg || this.busy) return;
+    const files = fromComposer ? this.pending.slice() : [];
+    if ((!msg && files.length === 0) || this.busy) return;
     if (!this.ready) await this.show();
-    this.input.value = "";
+    const slash = this.assistant === "claude" && isSlashMessage(msg);
+    const sending = slash ? [] : files;
+    const caption = msg || "Please look at the attached files.";
+    if (fromComposer) this.input.value = "";
+    this.closeSlash();
     this.log.querySelector(".chat-empty")?.remove();
-    this.log.append(h("div", { class: "msg user" }, msg));
+    this.log.append(this.userBubble(caption, sending));
     this.scroll();
     this.stderr = [];
+    this.streamedThisTurn = false;
     this.setBusy(true);
     try {
       await this.ensureRunning();
-      await api.claudeSend(this.chatId, msg, this.shareContext ? this.context() : undefined);
+      const attachments: ChatAttachment[] = sending.map((file) => ({
+        name: file.name,
+        media_type: file.media_type,
+        data: file.data,
+      }));
+      await api.claudeSend(
+        this.chatId,
+        caption,
+        slash || !this.shareContext ? undefined : this.context(),
+        attachments,
+      );
+      if (fromComposer && !slash) this.clearPending();
+      if (fromComposer && slash && files.length) {
+        toast("Sent the command. The attached files stay here for the next message.");
+      }
     } catch (e) {
+      if (fromComposer && !this.input.value) this.input.value = msg;
       this.setBusy(false);
       this.error(String(e));
     }
@@ -713,6 +1077,7 @@ export class ClaudePanel {
     if (this.heading) this.heading.textContent = assistantMeta(this.assistant).label;
     if (this.remoteBtn) this.remoteBtn.hidden = this.assistant !== "claude";
     this.input.placeholder = assistantMeta(this.assistant).placeholder;
+    this.closeSlash();
     if (this.running) {
       await this.stop();
       if (!switched && this.log.isConnected) this.note("Account or model changed. Send a message to continue with it.");
@@ -794,6 +1159,9 @@ export class ClaudePanel {
           const paper = (ev.mcp_servers ?? []).find((s: { name: string }) => s.name === "paper");
           this.statusLine.textContent = `${ev.model ?? assistantMeta(this.assistant).label}${paper ? ` · paper tools ${paper.status === "connected" ? "✓" : paper.status}` : ""}`;
           void this.loadSessions(this.sessionId ?? undefined);
+        } else {
+          const text = systemNote(ev);
+          if (text) this.note(text.slice(0, 6000));
         }
         break;
       case "stream_event":
@@ -841,6 +1209,7 @@ export class ClaudePanel {
       const b = this.bubble(this.currentMsg);
       b.text += e.delta.text;
       b.streamed = true;
+      if (e.delta.text) this.streamedThisTurn = true;
       this.queueRender(this.currentMsg);
     }
   }
@@ -851,6 +1220,7 @@ export class ClaudePanel {
     for (const block of message?.content ?? []) {
       if (block.type === "text") {
         const b = this.bubble(id);
+        if (typeof block.text === "string" && block.text.trim()) this.streamedThisTurn = true;
         if (!b.streamed) {
           b.text = block.text;
           this.queueRender(id);
@@ -1097,6 +1467,13 @@ export class ClaudePanel {
     if (ev.num_turns) parts.push(`${ev.num_turns} turns`);
     if (ev.duration_ms) parts.push(`${(ev.duration_ms / 1000).toFixed(1)}s`);
     this.note(parts.join(" · "));
+    if (!ev.is_error && typeof ev.result === "string" && ev.result.trim() && !this.streamedThisTurn) {
+      const id = `result-${crypto.randomUUID()}`;
+      const bubble = this.bubble(id);
+      bubble.text = ev.result;
+      this.streamedThisTurn = true;
+      this.queueRender(id);
+    }
     if (ev.is_error && typeof ev.result === "string") {
       if (/log ?in|auth/i.test(ev.result)) this.loginNeeded(ev.result);
       else this.error(ev.result);

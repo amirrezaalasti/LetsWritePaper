@@ -158,9 +158,11 @@ export async function setupWizard(onDone: () => void): Promise<void> {
         const install = h("button", {
           class: tool.installed || primaryGiven ? "" : "primary",
           onclick: async () => {
+            if (busy) return;
             busy = true;
             install.disabled = true;
             install.textContent = `Installing ${tool.product}…`;
+            log.textContent = "";
             const unlisten = await events.onInstallLog((line) => {
               log.textContent += `${line}\n`;
               log.scrollTop = log.scrollHeight;

@@ -1450,6 +1450,82 @@ del {
   font-size: 13px;
   resize: none;
 }
+.chat-compose.drop {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
+}
+.attach-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attach-row[hidden] {
+  display: none;
+}
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 6px;
+  background: var(--bg);
+  font-size: 12px;
+}
+.attach-chip img,
+.attach-thumb {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+.attach-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-sent {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.slash-menu {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  max-height: 240px;
+  overflow: auto;
+}
+.slash-menu[hidden] {
+  display: none;
+}
+.slash-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.slash-item code {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.slash-item span {
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.slash-item.active,
+.slash-item:hover {
+  background: var(--bg-2);
+}
 .chat-bar {
   display: flex;
   align-items: center;
