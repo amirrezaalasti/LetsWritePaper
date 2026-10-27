@@ -2551,8 +2551,8 @@ mod tests {
         assert!(get("ANTHROPIC_DEFAULT_SONNET_MODEL")
             .unwrap()
             .contains("claude-sonnet"));
-        assert!(remove.iter().any(|key| *key == "CLAUDE_CODE_USE_BEDROCK"));
-        assert!(!remove.iter().any(|key| *key == "ANTHROPIC_AUTH_TOKEN"));
+        assert!(remove.contains(&"CLAUDE_CODE_USE_BEDROCK"));
+        assert!(!remove.contains(&"ANTHROPIC_AUTH_TOKEN"));
         assert_eq!(model_arg(Some("openrouter"), None), Some("sonnet"));
         assert_eq!(
             model_arg(Some("openrouter"), Some("anthropic/claude-opus-4.6")),
