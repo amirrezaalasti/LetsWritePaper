@@ -270,6 +270,9 @@ jobs:
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job has no checkout, so gh needs the repository named.
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
           cat > notes.md <<'EOF'
           ## Install
@@ -282,6 +285,19 @@ jobs:
 
           No clone or compiler is required. The first time the app opens, its setup wizard asks for your name and can install tectonic and Claude Code.
           EOF
-          gh release edit "${{ github.ref_name }}" --draft=false --latest \
-            --title "LetsWritePaper ${{ github.ref_name }}" \
-            --notes-file notes.md
+          # Re-pushing a tag leaves one draft per run, so publish the draft that
+          # holds the most files and delete the other drafts for this tag.
+          ids=$(gh api "repos/$GH_REPO/releases?per_page=100" \
+            --jq "[.[] | select(.draft and .tag_name == \"$TAG\")] | sort_by(-(.assets | length)) | .[].id")
+          keep=$(head -n 1 <<< "$ids")
+          if [[ -z "$keep" ]]; then
+            echo "No draft release for $TAG." >&2
+            exit 1
+          fi
+          for id in $(tail -n +2 <<< "$ids"); do
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          gh api -X PATCH "repos/$GH_REPO/releases/$keep" \
+            -F draft=false -f make_latest=true \
+            -f name="LetsWritePaper $TAG" \
+            -F body=@notes.md
