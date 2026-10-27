@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "letswritepaper-app"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "paper-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "paper-compile"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "paper-core",
@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "paper-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3853,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "paper-mcp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "paper-compile",
@@ -3866,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "paper-sync"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "paper-core",
