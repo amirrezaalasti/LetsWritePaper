@@ -649,8 +649,17 @@ impl ClaudeChats {
         }
         let claude = find_claude().ok_or("Claude Code is not installed")?;
         let mut cmd = base_args(&claude, root)?;
+        if provider == Some("openrouter") && nonempty(api_key).is_none() {
+            return Err("Enter an OpenRouter API key. Open Sign in and paste the key. It is kept until you quit and is not saved in the paper.".into());
+        }
         if let Some(provider) = provider {
-            apply_provider(&mut cmd, provider, foundry_resource, foundry_api_key);
+            apply_provider(
+                &mut cmd,
+                provider,
+                foundry_resource,
+                foundry_api_key,
+                api_key,
+            );
         }
         cmd.args([
             "-p",
@@ -676,7 +685,7 @@ impl ClaudeChats {
         if let Some(id) = resume {
             cmd.args(["--resume", id]);
         }
-        if let Some(m) = model.filter(|m| !m.is_empty()) {
+        if let Some(m) = model_arg(provider, model) {
             cmd.args(["--model", m]);
         }
         let mut child = cmd
@@ -2111,37 +2120,65 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// Argument for `cmd /S /K`. `/S` removes one leading and one trailing quote
+/// and leaves every quote inside the command alone.
+///
+/// Passing the same text through `Command::args` makes Rust emit `\"`. `cmd`
+/// does not treat that as an escaped quote, so `cd` reports "The filename,
+/// directory name, or volume label syntax is incorrect" and an unbalanced
+/// quote count makes `cmd` report that memory is exhausted. The new window
+/// then sits at `C:\Windows\System32`.
+#[cfg(any(windows, test))]
+fn windows_k_argument(command: &str) -> String {
+    format!("\"{command}\"")
+}
+
 /// Open the platform terminal in `dir` running `command`.
 fn open_terminal(dir: &Path, command: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return open_mac_terminal(dir, command);
+    #[cfg(windows)]
+    return open_windows_terminal(dir, command);
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return open_linux_terminal(dir, command);
+}
+
+#[cfg(target_os = "macos")]
+fn open_mac_terminal(dir: &Path, command: &str) -> Result<(), String> {
     let dir_s = dir.display().to_string();
-    if cfg!(target_os = "macos") {
-        let script = format!("cd {} && {}", shell_quote(&dir_s), command);
-        let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
-        Command::new("osascript")
-            .args([
-                "-e",
-                &format!("tell application \"Terminal\" to do script \"{escaped}\""),
-                "-e",
-                "tell application \"Terminal\" to activate",
-            ])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    if cfg!(windows) {
-        Command::new("cmd")
-            .args([
-                "/C",
-                "start",
-                "",
-                "cmd",
-                "/K",
-                &format!("cd /d {} && {}", shell_quote(&dir_s), command),
-            ])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
+    let script = format!("cd {} && {}", shell_quote(&dir_s), command);
+    let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+    Command::new("osascript")
+        .args([
+            "-e",
+            &format!("tell application \"Terminal\" to do script \"{escaped}\""),
+            "-e",
+            "tell application \"Terminal\" to activate",
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_windows_terminal(dir: &Path, command: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // A window of its own. The app is a GUI process and has no console to share.
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    Command::new("cmd")
+        .current_dir(dir)
+        .raw_arg("/S")
+        .raw_arg("/K")
+        .raw_arg(windows_k_argument(command))
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map_err(|e| format!("could not open a terminal: {e}"))?;
+    Ok(())
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn open_linux_terminal(dir: &Path, command: &str) -> Result<(), String> {
+    let dir_s = dir.display().to_string();
     let script = format!(
         "cd {} && {}; exec \"${{SHELL:-/bin/sh}}\"",
         shell_quote(&dir_s),
@@ -2171,38 +2208,107 @@ fn open_terminal(dir: &Path, command: &str) -> Result<(), String> {
 }
 
 /// Point a Claude Code process at the provider chosen in the sign-in dialog.
-/// Cloud-provider variables already in the environment are cleared first so a
-/// claude.ai or Console choice is not overridden by a leftover shell export.
+/// Cloud-provider and gateway variables already in the environment are cleared
+/// first so a claude.ai or Console choice is not overridden by a leftover shell export.
 pub fn apply_provider(
     cmd: &mut Command,
     provider: &str,
     foundry_resource: Option<&str>,
     foundry_api_key: Option<&str>,
+    openrouter_key: Option<&str>,
 ) {
-    for key in [
+    let (set, remove) = provider_env(provider, foundry_resource, foundry_api_key, openrouter_key);
+    for key in remove {
+        cmd.env_remove(key);
+    }
+    for (key, value) in set {
+        cmd.env(key, value);
+    }
+}
+
+/// Environment for one Claude Code process. `set` overwrites; `remove` drops
+/// values inherited from the shell that launched the app.
+fn provider_env(
+    provider: &str,
+    foundry_resource: Option<&str>,
+    foundry_api_key: Option<&str>,
+    openrouter_key: Option<&str>,
+) -> (Vec<(&'static str, String)>, Vec<&'static str>) {
+    let mut remove = vec![
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_USE_FOUNDRY",
-    ] {
-        cmd.env_remove(key);
-    }
+    ];
+    let mut set = Vec::new();
     match provider {
-        "bedrock" => {
-            cmd.env("CLAUDE_CODE_USE_BEDROCK", "1");
-        }
-        "vertex" => {
-            cmd.env("CLAUDE_CODE_USE_VERTEX", "1");
-        }
+        "bedrock" => set.push(("CLAUDE_CODE_USE_BEDROCK", "1".into())),
+        "vertex" => set.push(("CLAUDE_CODE_USE_VERTEX", "1".into())),
         "foundry" => {
-            cmd.env("CLAUDE_CODE_USE_FOUNDRY", "1");
+            set.push(("CLAUDE_CODE_USE_FOUNDRY", "1".into()));
             if let Some(resource) = nonempty(foundry_resource) {
-                cmd.env("ANTHROPIC_FOUNDRY_RESOURCE", resource);
+                set.push(("ANTHROPIC_FOUNDRY_RESOURCE", resource.to_string()));
             }
             if let Some(key) = nonempty(foundry_api_key) {
-                cmd.env("ANTHROPIC_FOUNDRY_API_KEY", key);
+                set.push(("ANTHROPIC_FOUNDRY_API_KEY", key.to_string()));
             }
         }
+        "openrouter" => {
+            // Bearer token, not x-api-key. An empty ANTHROPIC_API_KEY stops Claude
+            // Code from falling back to a saved Anthropic login or a shell key.
+            set.push(("ANTHROPIC_BASE_URL", "https://openrouter.ai/api".into()));
+            set.push((
+                "ANTHROPIC_AUTH_TOKEN",
+                nonempty(openrouter_key).unwrap_or("").to_string(),
+            ));
+            set.push(("ANTHROPIC_API_KEY", String::new()));
+            set.push((
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                "~anthropic/claude-fable-latest[1m]".into(),
+            ));
+            set.push((
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "~anthropic/claude-opus-latest[1m]".into(),
+            ));
+            set.push((
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "~anthropic/claude-sonnet-latest[1m]".into(),
+            ));
+            set.push((
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "~anthropic/claude-haiku-latest".into(),
+            ));
+            set.push((
+                "CLAUDE_CODE_SUBAGENT_MODEL",
+                "~anthropic/claude-opus-latest[1m]".into(),
+            ));
+        }
         _ => {}
+    }
+    if provider != "openrouter" {
+        remove.extend([
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "CLAUDE_CODE_SUBAGENT_MODEL",
+        ]);
+    }
+    (set, remove)
+}
+
+/// Model flag for this chat. An empty OpenRouter choice is Sonnet, which the
+/// gateway aliases above resolve. Any other id, including a full OpenRouter
+/// slug typed in the dialog, is passed through.
+fn model_arg<'a>(provider: Option<&str>, model: Option<&'a str>) -> Option<&'a str> {
+    if let Some(model) = nonempty(model) {
+        return Some(model);
+    }
+    if provider == Some("openrouter") {
+        Some("sonnet")
+    } else {
+        None
     }
 }
 
@@ -2432,6 +2538,39 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_sends_the_key_as_a_bearer_token() {
+        let (set, remove) = provider_env("openrouter", None, None, Some("sk-or-test"));
+        let get = |name: &str| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(get("ANTHROPIC_BASE_URL"), Some("https://openrouter.ai/api"));
+        assert_eq!(get("ANTHROPIC_AUTH_TOKEN"), Some("sk-or-test"));
+        assert_eq!(get("ANTHROPIC_API_KEY"), Some(""));
+        assert!(get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+            .unwrap()
+            .contains("claude-sonnet"));
+        assert!(remove.iter().any(|key| *key == "CLAUDE_CODE_USE_BEDROCK"));
+        assert!(!remove.iter().any(|key| *key == "ANTHROPIC_AUTH_TOKEN"));
+        assert_eq!(model_arg(Some("openrouter"), None), Some("sonnet"));
+        assert_eq!(
+            model_arg(Some("openrouter"), Some("anthropic/claude-opus-4.6")),
+            Some("anthropic/claude-opus-4.6")
+        );
+    }
+
+    #[test]
+    fn a_claude_account_drops_a_leftover_openrouter_gateway() {
+        let (set, remove) = provider_env("claudeai", None, None, Some("sk-or-test"));
+        assert!(set.is_empty());
+        assert!(remove.contains(&"ANTHROPIC_BASE_URL"));
+        assert!(remove.contains(&"ANTHROPIC_AUTH_TOKEN"));
+        assert!(!remove.contains(&"ANTHROPIC_API_KEY"));
+        assert_eq!(model_arg(Some("claudeai"), None), None);
+    }
+
+    #[test]
     fn cloud_login_names_the_provider_and_starts_claude() {
         let bedrock = login_command("claude", "bedrock", None, false);
         assert!(bedrock.contains("Amazon Bedrock"), "{bedrock}");
@@ -2453,6 +2592,15 @@ mod tests {
         assert!(cmd.contains("Amazon Bedrock"), "{cmd}");
         assert!(!cmd.contains("exec "), "{cmd}");
         assert!(cmd.contains("\"C:\\Program Files\\claude.exe\""), "{cmd}");
+    }
+
+    #[test]
+    fn windows_terminal_keeps_quotes_inside_the_command() {
+        let command = login_command(r"C:\Program Files\agy.exe", "claudeai", None, true);
+        let arg = windows_k_argument(&command);
+        assert!(arg.starts_with('"') && arg.ends_with('"'), "{arg}");
+        assert!(!arg.contains("\\\""), "{arg}");
+        assert_eq!(&arg[1..arg.len() - 1], command);
     }
 
     fn reply(behavior: &str) -> PermissionReply {

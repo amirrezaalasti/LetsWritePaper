@@ -119,7 +119,7 @@ The first time the app opens, a setup wizard asks for the name your edits should
 - For LaTeX preview: [`tectonic`](https://tectonic-typesetting.github.io/) (the setup wizard installs it) or a TeX
   distribution with `latexmk`. Typst preview is built into the desktop app.
 - On Linux, the Tauri system packages: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf`.
-- For the assistant panel: Claude Code, Codex, or Antigravity (the setup wizard can install hem) and thet matching account. Claude can use a Claude account or an API key. ChatGPT uses a ChatGPT login or an OpenAI API key. Gemini uses a Google AI Pro or Ultra account through Antigravity, or a Gemini API key.
+- For the assistant panel: Claude Code, Codex, or Antigravity (the setup wizard can install hem) and thet matching account. Claude can use a Claude account, a cloud provider, or an OpenRouter API key with no sign-in. ChatGPT uses a ChatGPT login or an OpenAI API key. Gemini uses a Google AI Pro or Ultra account through Antigravity, or a Gemini API key.
 
 ### Desktop app
 
@@ -204,8 +204,10 @@ Prompts are exposed as slash commands (`/mcp__paper__write-section`, `/mcp__pape
 Click **◆ Assistant** (⌘/Ctrl+L) in the app. 🔑 asks which assistant to use — Claude, ChatGPT,
 or Gemini — then the account and model. If that assistant's program is missing, **Install**
 runs its official installer. Sign-in opens a terminal: Claude Code for Claude, `codex login`
-for a ChatGPT account, and `agy` for a Google AI Pro or Ultra account. An API key, when you
-choose one, is handed to that program and is not saved in the paper.
+for a ChatGPT account, and `agy` for a Google AI Pro or Ultra account. **OpenRouter API key**
+skips that terminal: paste a key from openrouter.ai and the Claude panel sends requests there.
+An API key, when you choose one, is handed to that program and is not saved in the paper. It
+lasts until you quit the app.
 
 Claude chats run your own Claude Code (`claude -p --input-format stream-json …`). ChatGPT
 chats run Codex (`codex exec --json`). Gemini chats run Antigravity
@@ -214,7 +216,8 @@ each keeps its own chats. You can switch among them from 🔑.
 
 - **Model.** The model menu lists the models that provider serves. The same alias is a
   different model on each one: Sonnet is Sonnet 5.5 on Anthropic, Sonnet 4.5 on Bedrock and
-  Agent Platform, and Foundry's Opus alias is Opus 4.6. Changing it restarts the chat.
+  Agent Platform, and Foundry's Opus alias is Opus 4.6. OpenRouter uses the latest Fable,
+  Opus, Sonnet, or Haiku on OpenRouter, or any model id you type. Changing it restarts the chat.
 - **Modes.** *Paper tools* (default) pre-approves the paper tools and reading files. With Claude,
   web search and anything else ask you to allow them in the chat. *Paper tools + file edits*
   also accepts file edits without asking. ChatGPT and Gemini cannot ask in the panel, so
@@ -335,9 +338,9 @@ This is an early (0.1) version.
 - No SyncTeX jump between the PDF and the source yet. LaTeX preview re-renders the whole PDF.
 - The relay speaks plain HTTP. Use HTTPS in front of it for anything beyond a trusted LAN.
 - The assistant panel drives the Claude Code, Codex, or Antigravity CLI installed on your
-  machine, with your own account. If you plan to distribute builds to other people, review
-  each vendor's terms on offering account login in third-party products; API-key login is
-  the safe default.
+  machine, with your own account or an API key. OpenRouter is an API key only: no account
+  login. If you plan to distribute builds to other people, review each vendor's terms on
+  offering account login in third-party products; API-key login is the safe default.
 - Tests run on macOS. Windows and Linux builds are covered by CI configuration but haven't
   been exercised by hand yet.
 

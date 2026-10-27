@@ -42,7 +42,7 @@ export function renderMarkdown(src: string): string {
   return out.join("");
 }
 
-type ProviderId = "claudeai" | "console" | "bedrock" | "vertex" | "foundry";
+type ProviderId = "claudeai" | "console" | "bedrock" | "vertex" | "foundry" | "openrouter";
 type AssistantId = "claude" | "chatgpt" | "gemini";
 
 interface ModelOption {
@@ -244,6 +244,7 @@ const PROVIDERS: { id: ProviderId; label: string; hint: string }[] = [
   { id: "bedrock", label: "Amazon Bedrock", hint: "Opens Claude Code. At the login prompt, choose 3rd-party platform, then Amazon Bedrock. The wizard lists the models your account can use." },
   { id: "vertex", label: "Google Cloud Agent Platform", hint: "Opens Claude Code. At the login prompt, choose 3rd-party platform, then Google Vertex AI. The wizard lists the models your project can use." },
   { id: "foundry", label: "Microsoft Foundry", hint: "The Claude panel uses this Azure resource. Leave the API key empty to sign in with az login in a terminal. A key you enter is kept until you quit the app." },
+  { id: "openrouter", label: "OpenRouter API key", hint: "Paste a key from openrouter.ai. No account sign-in. The key is used until you quit the app and is not saved in the paper. Claude Code still has to be installed; it sends each request to OpenRouter. If this computer is already signed in to a Claude account and a request fails, sign out of Claude Code once." },
 ];
 
 // Alias targets differ by provider. See Claude Code's model configuration:
@@ -291,6 +292,14 @@ const MODELS: Record<ProviderId, ModelOption[]> = {
     { id: "sonnet", label: "Sonnet 4.5" },
     { id: "haiku", label: "Haiku 4.5" },
     { id: "opusplan", label: "Opus 4.6 to plan, Sonnet 4.5 to edit" },
+  ],
+  openrouter: [
+    { id: "", label: "Sonnet (latest)" },
+    { id: "fable", label: "Fable (latest)" },
+    { id: "opus", label: "Opus (latest)" },
+    { id: "sonnet", label: "Sonnet (latest)" },
+    { id: "haiku", label: "Haiku (latest)" },
+    { id: "opusplan", label: "Opus to plan, Sonnet to edit" },
   ],
 };
 
@@ -393,11 +402,17 @@ function chooseSignIn(initial: SignInChoice, status: ClaudeAuthInfo | null): Pro
         if (!customSelected) custom.value = "";
       }
       customLabel.hidden = model.value !== CUSTOM_MODEL;
-      custom.placeholder = id === "claude" ? "Model id, Bedrock inference profile, or Foundry deployment name" : "Model id";
+      const openrouter = id === "claude" && account === "openrouter";
+      custom.placeholder = openrouter
+        ? "OpenRouter model id, for example anthropic/claude-opus-4.6"
+        : id === "claude"
+          ? "Model id, Bedrock inference profile, or Foundry deployment name"
+          : "Model id";
       const accountHint = accountsFor(id).find((item) => item.id === account)?.hint ?? "";
       hint.textContent = accountHint;
       foundry.hidden = !(id === "claude" && account === "foundry");
-      accountKeyLabel.hidden = account !== "apikey";
+      accountKeyLabel.hidden = account !== "apikey" && !openrouter;
+      accountKey.placeholder = openrouter ? "sk-or-…" : "Paste the key";
     };
     assistant.addEventListener("change", () => {
       fillAccounts(false);
@@ -429,10 +444,12 @@ function chooseSignIn(initial: SignInChoice, status: ClaudeAuthInfo | null): Pro
         resource.classList.add("invalid");
         return;
       }
-      if (id === "gemini" && account === "apikey" && !accountKey.value.trim()) {
-        accountKey.focus();
-        accountKey.classList.add("invalid");
-        return;
+      if ((id === "gemini" && account === "apikey") || (id === "claude" && account === "openrouter")) {
+        if (!accountKey.value.trim()) {
+          accountKey.focus();
+          accountKey.classList.add("invalid");
+          return;
+        }
       }
       close({
         assistant: id,
@@ -455,7 +472,7 @@ function chooseSignIn(initial: SignInChoice, status: ClaudeAuthInfo | null): Pro
         h("h2", {}, "Sign in"),
         h("div", { class: "form" },
           current,
-          h("p", { class: "muted" }, "Choose Claude, ChatGPT, or Gemini, then the account and model that should answer. You can switch later; each assistant keeps its own chats."),
+          h("p", { class: "muted" }, "Choose Claude, ChatGPT, or Gemini, then the account and model that should answer. OpenRouter needs only an API key. You can switch later; each assistant keeps its own chats."),
           h("label", {}, h("span", {}, "Assistant"), assistant),
           h("label", {}, h("span", {}, "Account or provider"), provider),
           h("label", {}, h("span", {}, "Model"), model),
@@ -702,7 +719,7 @@ export class ClaudePanel {
         this.assistant === "gemini" ? null : h("code", { class: "block" }, command),
         h("div", { class: "actions" }, btn, h("button", { onclick: () => ((this.ready = false), void this.show()) }, "I installed it"), h("button", { onclick: () => void this.signIn() }, "Use a different assistant")),
         out,
-        h("p", { class: "muted small" }, "You can use Claude, ChatGPT, or Gemini. Each one signs in with its own account."),
+        h("p", { class: "muted small" }, "You can use Claude, ChatGPT, or Gemini. Each one signs in with its own account, or Claude can use an OpenRouter key with no sign-in."),
       ),
     );
   }
@@ -733,7 +750,7 @@ export class ClaudePanel {
     );
     this.heading = h("strong", {}, meta.label);
     this.remoteBtn = h("button", { class: "icon", title: "Continue on your phone or another computer", "aria-label": "Continue on another device", onclick: () => this.continueElsewhere() }, "📱");
-    this.remoteBtn.hidden = this.assistant !== "claude";
+    this.remoteBtn.hidden = !this.remoteAvailable();
     clear(
       this.root,
       h(
@@ -854,7 +871,7 @@ export class ClaudePanel {
       this.foundryResource || undefined,
       this.foundryApiKey || undefined,
       this.assistant,
-      this.assistant === "gemini" ? this.apiKey || undefined : undefined,
+      this.assistant === "gemini" || this.provider === "openrouter" ? this.apiKey || undefined : undefined,
     );
     this.running = true;
   }
@@ -1317,6 +1334,11 @@ export class ClaudePanel {
     saveAuth({ assistant: this.assistant, provider: this.provider, model: this.model, foundryResource: this.foundryResource });
   }
 
+  /** Remote Control needs a Claude account. An OpenRouter key has no claude.ai login to pair with. */
+  private remoteAvailable(): boolean {
+    return this.assistant === "claude" && this.provider !== "openrouter";
+  }
+
   private async signIn() {
     const saved = loadAuth();
     const asking = saved.stored ? saved.assistant : this.assistant;
@@ -1344,7 +1366,7 @@ export class ClaudePanel {
     this.persist();
     this.fillModelSelect();
     if (this.heading) this.heading.textContent = assistantMeta(this.assistant).label;
-    if (this.remoteBtn) this.remoteBtn.hidden = this.assistant !== "claude";
+    if (this.remoteBtn) this.remoteBtn.hidden = !this.remoteAvailable();
     this.input.placeholder = assistantMeta(this.assistant).placeholder;
     this.closeSlash();
     if (this.running) {
@@ -1382,6 +1404,10 @@ export class ClaudePanel {
       if (choice.assistant === "gemini" && choice.provider === "apikey") {
         await api.assistantStoreKey("gemini", choice.apiKey);
         toast("Gemini will use that API key until you quit. Send a message to start.");
+        return;
+      }
+      if (choice.assistant === "claude" && choice.provider === "openrouter") {
+        toast("OpenRouter will use that key until you quit. Send a message to start.");
         return;
       }
     } catch (e) {
